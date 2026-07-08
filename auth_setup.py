@@ -31,9 +31,22 @@ def save_config(config, config_path):
     except Exception as e:
         print(f"Error saving configuration: {e}")
 
-def run_m365_device_flow(client_id):
-    print("\n--- Initiating Microsoft 365 Authentication ---")
-    device_code_url = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+def get_m365_tenant(email_addr):
+    """
+    Extracts a tenant domain from the M365 email address.
+    Defaults to 'organizations' for custom domains, and handles personal Microsoft accounts.
+    """
+    if not email_addr or "@" not in email_addr:
+        return "organizations"
+    domain = email_addr.split("@")[-1].lower()
+    # If personal Microsoft domains are used
+    if domain in ("outlook.com", "hotmail.com", "live.com", "msn.com"):
+        return "consumers"
+    return domain
+
+def run_m365_device_flow(client_id, tenant):
+    print(f"\n--- Initiating Microsoft 365 Authentication (Tenant: {tenant}) ---")
+    device_code_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = {
         "client_id": client_id,
@@ -46,6 +59,15 @@ def run_m365_device_flow(client_id):
     try:
         with urllib.request.urlopen(req) as response:
             res_data = json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        print(f"Error requesting device code from Microsoft: HTTP Error {e.code}: {e.reason}")
+        try:
+            body = e.read().decode('utf-8')
+            err_res = json.loads(body)
+            print(f"Details: {err_res.get('error_description')}")
+        except Exception:
+            pass
+        return None
     except Exception as e:
         print(f"Error requesting device code from Microsoft: {e}")
         return None
@@ -61,7 +83,7 @@ def run_m365_device_flow(client_id):
     print("----------------------------------------------------\n")
     print("Waiting for Microsoft authentication (polling endpoints)...")
 
-    token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     token_payload = {
         "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
         "client_id": client_id,
@@ -204,6 +226,12 @@ def configure_bridge(config_path):
     config["m365_email"] = m365_email
     config["gmail_email"] = gmail_email
 
+    # Extract default M365 Tenant from the email domain
+    default_tenant = get_m365_tenant(m365_email)
+    current_tenant = config.get("m365_tenant", default_tenant)
+    m365_tenant = input(f"Enter Microsoft 365 Tenant ID or domain [{current_tenant}]: ").strip() or current_tenant
+    config["m365_tenant"] = m365_tenant
+
     current_method = config.get("gmail_auth_method", "app_password")
     print("\nGmail Authentication Methods:")
     print(" [1] App Password (Default, simple, recommended for personal accounts)")
@@ -258,7 +286,8 @@ def configure_bridge(config_path):
         config["gmail_refresh_token"] = gmail_refresh
         config.pop("gmail_password", None)
 
-    m365_refresh = run_m365_device_flow(config["m365_client_id"])
+    # Run Microsoft 365 authentication
+    m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
     if not m365_refresh:
         print("Error: Failed to obtain Microsoft 365 refresh token.")
         sys.exit(1)
@@ -281,10 +310,8 @@ def teardown_bridge(config_path):
         print("Teardown cancelled.")
         return
 
-    # Identify db path
     db_path = config.get("database_path", "email_bridge.db")
 
-    # Delete database files
     deleted_files = []
     for ext in ["", "-journal", "-wal", "-shm"]:
         target = f"{db_path}{ext}" if ext else db_path
@@ -295,7 +322,6 @@ def teardown_bridge(config_path):
             except Exception as e:
                 print(f"Warning: Failed to delete {target}: {e}")
 
-    # Delete config.json
     if os.path.exists(config_path):
         try:
             os.remove(config_path)

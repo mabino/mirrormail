@@ -95,7 +95,8 @@ def refresh_m365_token(config, config_path):
     Refreshes the Microsoft 365 OAuth2 access token.
     Updates config.json if a new refresh token is returned.
     """
-    token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    tenant = config.get("m365_tenant", "organizations")
+    token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = {
         "grant_type": "refresh_token",
