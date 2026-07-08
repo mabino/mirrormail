@@ -1,6 +1,6 @@
 # Microsoft 365 to Gmail Email Bridge Daemon
 
-A lightweight Python service that synchronizes emails from a Microsoft 365 inbox to a Gmail account. It uses the Microsoft Device Code Flow (via Alpine's registered Client ID) for Outlook, and supports either standard App Passwords or Google OAuth2 (Device Flow) for Gmail.
+A lightweight Python service that synchronizes emails from a Microsoft 365 inbox to a Gmail account. It uses the Microsoft Device Code Flow (via Thunderbird's pre-approved Client ID) for Outlook, and supports either standard App Passwords or Google OAuth2 (Device Flow) for Gmail.
 
 ---
 

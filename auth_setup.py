@@ -7,7 +7,8 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
-CLIENT_ID_M365 = "9a5bf30c-26d2-43fb-ab89-40c2136d88b4"
+# Using Mozilla Thunderbird Client ID as default since it is pre-approved in most enterprise/university tenants
+CLIENT_ID_M365 = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 SCOPES_M365 = ["https://outlook.office.com/IMAP.AccessAsUser.All", "offline_access"]
 
 def load_config(config_path):
@@ -81,7 +82,7 @@ def run_m365_device_flow(client_id, tenant):
                 print("\n==========================================================================")
                 print("ACTION REQUIRED: FIRST-TIME TENANT CONSENT")
                 print("==========================================================================")
-                print("The Alpine application is not yet registered or consented to in your")
+                print("The application is not yet registered or consented to in your")
                 print(f"Microsoft 365 directory (Tenant: '{tenant}').")
                 print("\nTo fix this, copy and paste the following URL into your web browser,")
                 print("sign in with your M365 account, and grant the requested permissions:")
@@ -98,7 +99,7 @@ def run_m365_device_flow(client_id, tenant):
         
     user_code = res_data.get("user_code")
     device_code = res_data.get("device_code")
-    verification_uri = res_data.get("verification_uri")
+    verification_uri = res_data.get("verification_uri", "https://login.microsoft.com/device")
     interval = res_data.get("interval", 5)
     expires_in = res_data.get("expires_in", 900)
     
@@ -245,11 +246,13 @@ def configure_bridge(config_path):
         sys.exit(1)
 
     config["m365_client_id"] = config.get("m365_client_id") or CLIENT_ID_M365
-    if config["m365_client_id"] == "YOUR_CLIENT_ID" or not config["m365_client_id"]:
+    if config["m365_client_id"] in ("YOUR_CLIENT_ID", "9a5bf30c-26d2-43fb-ab89-40c2136d88b4", ""):
+        # Update default from Alpine to Thunderbird Client ID
         config["m365_client_id"] = CLIENT_ID_M365
     config["m365_email"] = m365_email
     config["gmail_email"] = gmail_email
 
+    # Extract default M365 Tenant from the email domain
     default_tenant = get_m365_tenant(m365_email)
     current_tenant = config.get("m365_tenant", default_tenant)
     m365_tenant = input(f"Enter Microsoft 365 Tenant ID or domain [{current_tenant}]: ").strip() or current_tenant
@@ -309,6 +312,7 @@ def configure_bridge(config_path):
         config["gmail_refresh_token"] = gmail_refresh
         config.pop("gmail_password", None)
 
+    # Run Microsoft 365 authentication
     m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
     if not m365_refresh:
         print("Error: Failed to obtain Microsoft 365 refresh token.")
