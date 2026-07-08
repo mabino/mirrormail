@@ -106,7 +106,6 @@ def run_m365_device_flow(client_id):
 
 def run_google_device_flow(client_id, client_secret):
     print("\n--- Initiating Google OAuth2 Authentication ---")
-    # Google Device Code URL
     device_code_url = "https://oauth2.googleapis.com/device/code"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = {
@@ -179,16 +178,10 @@ def run_google_device_flow(client_id, client_secret):
             print(f"\nAn error occurred while polling Google: {e}")
             return None
 
-def main():
-    config_path = "config.json"
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
-
+def configure_bridge(config_path):
     config = load_config(config_path)
-
-    print("Microsoft 365 & Gmail Bridge Setup Utility")
-    print("==========================================")
     
+    print("\n--- Configure / Update Email Bridge ---")
     current_m365 = config.get("m365_email", "")
     if not current_m365 or "YOUR_M365_EMAIL" in current_m365:
         m365_email = input("Enter Microsoft 365 email: ").strip()
@@ -271,8 +264,78 @@ def main():
         sys.exit(1)
     config["m365_refresh_token"] = m365_refresh
 
+    config["gmail_imap_server"] = config.get("gmail_imap_server") or "imap.gmail.com"
+    config["gmail_imap_port"] = config.get("gmail_imap_port") or 993
+    config["sync_interval_seconds"] = config.get("sync_interval_seconds") or 300
+    config["database_path"] = config.get("database_path") or "email_bridge.db"
+
     save_config(config, config_path)
-    print("\nInitialization Complete! You are now ready to run bridge_daemon.py.")
+    print("\nInitialization/Update Complete! You are now ready to run bridge_daemon.py.")
+
+def teardown_bridge(config_path):
+    print("\n--- Tear Down / Reset Email Bridge ---")
+    config = load_config(config_path)
+    
+    confirm = input("Are you sure you want to delete all local configurations and tracking databases? [y/N]: ").strip().lower()
+    if confirm != 'y':
+        print("Teardown cancelled.")
+        return
+
+    # Identify db path
+    db_path = config.get("database_path", "email_bridge.db")
+
+    # Delete database files
+    deleted_files = []
+    for ext in ["", "-journal", "-wal", "-shm"]:
+        target = f"{db_path}{ext}" if ext else db_path
+        if os.path.exists(target):
+            try:
+                os.remove(target)
+                deleted_files.append(target)
+            except Exception as e:
+                print(f"Warning: Failed to delete {target}: {e}")
+
+    # Delete config.json
+    if os.path.exists(config_path):
+        try:
+            os.remove(config_path)
+            deleted_files.append(config_path)
+        except Exception as e:
+            print(f"Warning: Failed to delete config file {config_path}: {e}")
+
+    if deleted_files:
+        print("\nSuccessfully removed:")
+        for f in deleted_files:
+            print(f" - {f}")
+    else:
+        print("\nNo configuration or database files were found to delete.")
+        
+    print("\nTeardown complete. Local environment has been reset.")
+
+def main():
+    config_path = "config.json"
+    if len(sys.argv) > 1:
+        config_path = sys.argv[1]
+
+    print("==========================================")
+    print("Microsoft 365 & Gmail Bridge Admin Utility")
+    print("==========================================")
+    print("Choose an action:")
+    print(" [1] Setup / Reconfigure Email Bridge (Update configuration and renew tokens)")
+    print(" [2] Tear Down / Reset (Delete local config and SQLite tracking database)")
+    print(" [3] Exit")
+    
+    choice = input("Enter choice [1-3]: ").strip()
+    if choice == "1":
+        configure_bridge(config_path)
+    elif choice == "2":
+        teardown_bridge(config_path)
+    elif choice == "3" or not choice:
+        print("Exiting.")
+        sys.exit(0)
+    else:
+        print("Invalid option. Exiting.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

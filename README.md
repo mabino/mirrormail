@@ -4,6 +4,38 @@ A lightweight Python service that synchronizes emails from a Microsoft 365 inbox
 
 ---
 
+## ⚡ Quick Setup (M365 & gmail.com using App Passwords)
+
+Follow these steps to set up synchronization from your **Microsoft 365** account to a generic **gmail.com** account in less than 5 minutes:
+
+### 1. Generate a Gmail App Password
+1. Go to your **Google Account Settings** -> **Security**.
+2. Under "How you sign in to Google", ensure **2-Step Verification** is turned on.
+3. Click on **2-Step Verification**, scroll to the bottom, and select **App passwords**.
+4. Generate a new app password (e.g. name it `Email Bridge`). Copy the **16-character code** (no spaces).
+
+### 2. Run the Configuration Utility
+Run the interactive setup script:
+```bash
+python auth_setup.py
+```
+*   Select option **`[1] Setup / Reconfigure`**.
+*   Enter your **Microsoft 365 email** and **Gmail email**.
+*   Select Gmail authentication method **`[1] App Password`** and paste the **16-character code** you generated.
+*   The script will print a link and code for Microsoft:
+    ```text
+    To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code C8H2J8K9L to authenticate.
+    ```
+*   Open the link in your browser, paste the code, and sign in with your M365 account to authorize IMAP access.
+
+### 3. Run the Sync Daemon
+```bash
+python bridge_daemon.py
+```
+*The daemon is now running in the background, copying new emails from Microsoft 365 to Gmail every 5 minutes.*
+
+---
+
 ## Architecture Overview
 
 ```mermaid
@@ -44,7 +76,7 @@ graph TD
 - **Option 1 (App Password Setup)**:
   - Enable 2-Step Verification on your Gmail account.
   - Go to Google Account Settings -> Security -> App passwords.
-  - Generate a new app password (e.g. name it "Email Bridge") and copy the 16-character code.
+  - Generate a new app password and copy the 16-character code.
 - **Option 2 & 3 (Google OAuth2 Setup)**:
   - A Google Cloud Platform (GCP) project with the **Gmail API** enabled.
   - An OAuth consent screen configured in GCP (typically set to "External" or "Internal", in "Testing" status).
@@ -53,29 +85,16 @@ graph TD
 
 ---
 
-## Setup & Configuration
+## Setup & Configuration (Complete Menu Options)
 
-### 1. Installation
-Clone the repository and install the development dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Run the Configuration Utility
-Run the setup utility to configure the email bridge:
+The bridge features a comprehensive administration utility:
 ```bash
 python auth_setup.py
 ```
+This utility provides an interactive menu:
 
-The script will guide you through:
-1. Entering your Microsoft 365 and Gmail email addresses.
-2. Selecting your Gmail Authentication method:
-   - `[1] App Password`: Enter your 16-character Gmail App Password.
-   - `[2] Google OAuth2 REST API`: Enter your Google Client ID/Secret, then complete the Google Device Login flow.
-   - `[3] Google OAuth2 IMAP XOAUTH2`: Enter your Google Client ID/Secret, then complete the Google Device Login flow.
-3. Authenticating with Microsoft 365 using the Microsoft Device Login flow.
-
-Upon completion, all tokens and configurations will be stored securely in `config.json`.
+*   **`[1] Setup / Reconfigure Email Bridge`**: Creates or updates configuration, prompts for credentials, and runs Microsoft and Google Device Code Flow authentications.
+*   **`[2] Tear Down / Reset`**: Prompts for confirmation and deletes the local configuration file (`config.json`) and the SQLite tracking databases (`email_bridge.db*`), fully clearing the local footprint.
 
 ---
 
