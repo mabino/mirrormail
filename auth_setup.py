@@ -39,7 +39,6 @@ def get_m365_tenant(email_addr):
     if not email_addr or "@" not in email_addr:
         return "organizations"
     domain = email_addr.split("@")[-1].lower()
-    # If personal Microsoft domains are used
     if domain in ("outlook.com", "hotmail.com", "live.com", "msn.com"):
         return "consumers"
     return domain
@@ -64,7 +63,32 @@ def run_m365_device_flow(client_id, tenant):
         try:
             body = e.read().decode('utf-8')
             err_res = json.loads(body)
-            print(f"Details: {err_res.get('error_description')}")
+            error_code = err_res.get("error")
+            error_desc = err_res.get("error_description", "")
+            print(f"Details: {error_desc}")
+            
+            # Check for AADSTS700016 (app not found in directory / needs consent)
+            if error_code == "unauthorized_client" or "AADSTS700016" in error_desc:
+                consent_url = (
+                    f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
+                    f"?client_id={client_id}"
+                    f"&response_type=code"
+                    f"&redirect_uri=https://login.microsoftonline.com/common/oauth2/nativeclient"
+                    f"&response_mode=query"
+                    f"&scope=https://outlook.office.com/IMAP.AccessAsUser.All%20offline_access"
+                    f"&state=12345"
+                )
+                print("\n==========================================================================")
+                print("ACTION REQUIRED: FIRST-TIME TENANT CONSENT")
+                print("==========================================================================")
+                print("The Alpine application is not yet registered or consented to in your")
+                print(f"Microsoft 365 directory (Tenant: '{tenant}').")
+                print("\nTo fix this, copy and paste the following URL into your web browser,")
+                print("sign in with your M365 account, and grant the requested permissions:")
+                print(f"\n{consent_url}")
+                print("\nNote: Depending on your organization's security policy, you may need an")
+                print("administrator to approve this application consent request.")
+                print("==========================================================================\n")
         except Exception:
             pass
         return None
@@ -226,7 +250,6 @@ def configure_bridge(config_path):
     config["m365_email"] = m365_email
     config["gmail_email"] = gmail_email
 
-    # Extract default M365 Tenant from the email domain
     default_tenant = get_m365_tenant(m365_email)
     current_tenant = config.get("m365_tenant", default_tenant)
     m365_tenant = input(f"Enter Microsoft 365 Tenant ID or domain [{current_tenant}]: ").strip() or current_tenant
@@ -286,7 +309,6 @@ def configure_bridge(config_path):
         config["gmail_refresh_token"] = gmail_refresh
         config.pop("gmail_password", None)
 
-    # Run Microsoft 365 authentication
     m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
     if not m365_refresh:
         print("Error: Failed to obtain Microsoft 365 refresh token.")
