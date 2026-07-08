@@ -6,6 +6,7 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
+import re
 
 # Using Microsoft Office Client ID as default since it is a first-party app and bypasses Conditional Access app restrictions
 CLIENT_ID_M365 = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
@@ -44,8 +45,79 @@ def get_m365_tenant(email_addr):
         return "consumers"
     return domain
 
+def run_m365_auth_code_flow(client_id, tenant):
+    print(f"\n--- Initiating Microsoft 365 Authentication (Browser Copy-Paste Flow) ---")
+    redirect_uri = "https://login.microsoftonline.com/common/oauth2/nativeclient"
+    auth_params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "response_mode": "query",
+        "scope": " ".join(SCOPES_M365),
+        "state": "12345"
+    }
+    
+    auth_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize?" + urllib.parse.urlencode(auth_params)
+    
+    print("\n==========================================================================")
+    print("INSTRUCTIONS:")
+    print("1. Open the following URL in your Princeton-managed web browser:")
+    print(f"\n{auth_url}")
+    print("\n2. Log in with your Princeton M365 account. Because this login occurs in your")
+    print("   native browser, any device compliance and MFA checks will succeed.")
+    print("3. After a successful login, the browser will redirect to a blank page starting with:")
+    print(f"   {redirect_uri}?code=...")
+    print("4. Copy the entire URL from the address bar and paste it below.")
+    print("==========================================================================\n")
+    
+    redirected_url = input("Paste the redirected URL here: ").strip()
+    if not redirected_url:
+        print("Error: No input received.")
+        return None
+        
+    code = None
+    match = re.search(r"[?&]code=([^&]+)", redirected_url)
+    if match:
+        code = match.group(1)
+    else:
+        code = redirected_url
+        
+    # Exchange code for tokens
+    token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "scope": " ".join(SCOPES_M365)
+    }
+    data = urllib.parse.urlencode(payload).encode('utf-8')
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    req = urllib.request.Request(token_url, data=data, headers=headers, method='POST')
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+        refresh_token = res_data.get("refresh_token")
+        if refresh_token:
+            print("Microsoft authentication successful!")
+            return refresh_token
+        else:
+            print("Error: Refresh token not found in response.")
+            return None
+    except urllib.error.HTTPError as e:
+        print(f"Error exchanging authorization code: HTTP Error {e.code}: {e.reason}")
+        try:
+            print("Details:", e.read().decode('utf-8'))
+        except Exception:
+            pass
+        return None
+    except Exception as e:
+        print(f"Error exchanging authorization code: {e}")
+        return None
+
 def run_m365_device_flow(client_id, tenant):
-    print(f"\n--- Initiating Microsoft 365 Authentication (Tenant: {tenant}) ---")
+    print(f"\n--- Initiating Microsoft 365 Authentication (Device Code Flow) ---")
     device_code_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     payload = {
@@ -99,7 +171,7 @@ def run_m365_device_flow(client_id, tenant):
         
     user_code = res_data.get("user_code")
     device_code = res_data.get("device_code")
-    verification_uri = res_data.get("verification_uri", "https://login.microsoft.com/device")
+    verification_uri = res_data.get("verification_uri")
     interval = res_data.get("interval", 5)
     expires_in = res_data.get("expires_in", 900)
     
@@ -310,7 +382,17 @@ def configure_bridge(config_path):
         config["gmail_refresh_token"] = gmail_refresh
         config.pop("gmail_password", None)
 
-    m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
+    # Choose Microsoft 365 Authentication Flow
+    print("\nMicrosoft 365 Authentication Flow Options:")
+    print(" [1] Browser Copy-Paste Flow (Recommended - evaluates device compliance)")
+    print(" [2] Device Code Flow (Alternative - fails if Princeton blocks device-less flows)")
+    flow_choice = input("Choose M365 authentication flow [default: 1]: ").strip()
+    
+    if flow_choice == "2":
+        m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
+    else:
+        m365_refresh = run_m365_auth_code_flow(config["m365_client_id"], config["m365_tenant"])
+        
     if not m365_refresh:
         print("Error: Failed to obtain Microsoft 365 refresh token.")
         sys.exit(1)
