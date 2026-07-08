@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  test-suite:
+    build: .
+    image: email-bridge-test-suite
+    command: pytest -v
+
+  bridge-daemon:
+    build: .
+    image: email-bridge-daemon
+    command: python bridge_daemon.py --config config.json
+    volumes:
+      - ./config.json:/app/config.json
+      - ./email_bridge.db:/app/email_bridge.db
+    restart: unless-stopped
