@@ -10,5 +10,6 @@
     "gmail_imap_server": "imap.gmail.com",
     "gmail_imap_port": 993,
     "sync_interval_seconds": 300,
-    "database_path": "email_bridge.db"
+    "database_path": "email_bridge.db",
+    "healthcheck_url": ""
 }

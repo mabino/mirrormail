@@ -551,6 +551,11 @@ def configure_bridge(config_path):
     config["sync_interval_seconds"] = config.get("sync_interval_seconds") or 300
     config["database_path"] = config.get("database_path") or "email_bridge.db"
 
+    print("\nMonitoring Options (Optional):")
+    current_hc = config.get("healthcheck_url", "")
+    healthcheck_url = input(f"Enter healthchecks.io ping URL (leave blank to disable) [{current_hc}]: ").strip() or current_hc
+    config["healthcheck_url"] = healthcheck_url
+
     save_config(config, config_path)
     print("\nInitialization/Update Complete! You are now ready to run bridge_daemon.py.")
 

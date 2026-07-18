@@ -533,5 +533,88 @@ class TestM365PasswordConnection(unittest.TestCase):
         )
 
 
+class TestHealthcheckMonitoring(unittest.TestCase):
+    """Tests for healthchecks.io ping reporting functionality."""
+
+    def setUp(self):
+        self.test_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.test_dir.name, "test_hc_bridge.db")
+        self.config_path = os.path.join(self.test_dir.name, "config.json")
+        self.config = {
+            "m365_email": "m365@example.com",
+            "gmail_email": "gmail@example.com",
+            "gmail_auth_method": "app_password",
+            "gmail_password": "pass",
+            "database_path": self.db_path,
+            "healthcheck_url": "https://hc-ping.com/fake-uuid"
+        }
+        bridge_daemon.init_db(self.db_path)
+        bridge_daemon.update_sync_state(self.db_path, "m365@example.com", 100, 41)
+
+    def tearDown(self):
+        self.test_dir.cleanup()
+
+    @patch('urllib.request.urlopen')
+    def test_ping_healthcheck_success_and_start(self, mock_urlopen):
+        """Verify get/start/success endpoint triggers get pings."""
+        bridge_daemon.ping_healthcheck("https://hc-ping.com/123", "start")
+        called_req = mock_urlopen.call_args[0][0]
+        self.assertEqual(called_req.full_url, "https://hc-ping.com/123/start")
+        self.assertEqual(called_req.method, "GET")
+
+        bridge_daemon.ping_healthcheck("https://hc-ping.com/123", "success")
+        called_req2 = mock_urlopen.call_args[0][0]
+        self.assertEqual(called_req2.full_url, "https://hc-ping.com/123")
+        self.assertEqual(called_req2.method, "GET")
+
+    @patch('urllib.request.urlopen')
+    def test_ping_healthcheck_fail_sends_post_payload(self, mock_urlopen):
+        """Verify fail endpoint sends POST request with error payload."""
+        bridge_daemon.ping_healthcheck("https://hc-ping.com/123", "fail", "Error traceback detail")
+        called_req = mock_urlopen.call_args[0][0]
+        self.assertEqual(called_req.full_url, "https://hc-ping.com/123/fail")
+        self.assertEqual(called_req.method, "POST")
+        self.assertEqual(called_req.data, b"Error traceback detail")
+        self.assertEqual(called_req.headers["Content-type"], "text/plain")
+
+    @patch('bridge_daemon.ping_healthcheck')
+    @patch('bridge_daemon.connect_gmail_imap')
+    @patch('bridge_daemon.connect_m365_imap')
+    @patch('bridge_daemon.refresh_m365_token')
+    def test_sync_emails_sends_start_and_success_pings(self, mock_refresh, mock_connect_m365, mock_connect_gmail, mock_ping):
+        mock_refresh.return_value = "at_123"
+        
+        mock_m365 = MagicMock()
+        mock_connect_m365.return_value = mock_m365
+        mock_m365.status.return_value = ('OK', [b'"INBOX" (UIDVALIDITY 100)'])
+        mock_m365.uid.return_value = ('OK', [b''])
+        
+        bridge_daemon.sync_emails(self.config, self.config_path)
+        
+        mock_ping.assert_any_call("https://hc-ping.com/fake-uuid", "start")
+        mock_ping.assert_any_call("https://hc-ping.com/fake-uuid", "success")
+
+    @patch('bridge_daemon.ping_healthcheck')
+    @patch('bridge_daemon.connect_gmail_imap')
+    @patch('bridge_daemon.connect_m365_imap')
+    @patch('bridge_daemon.refresh_m365_token')
+    def test_sync_emails_sends_fail_ping_on_exception(self, mock_refresh, mock_connect_m365, mock_connect_gmail, mock_ping):
+        mock_refresh.return_value = "at_123"
+        
+        mock_m365 = MagicMock()
+        mock_connect_m365.return_value = mock_m365
+        mock_m365.status.side_effect = Exception("IMAP connection broken")
+        
+        with self.assertRaises(Exception):
+            bridge_daemon.sync_emails(self.config, self.config_path)
+            
+        mock_ping.assert_any_call("https://hc-ping.com/fake-uuid", "start")
+        mock_ping.assert_any_call(
+            "https://hc-ping.com/fake-uuid", 
+            "fail", 
+            unittest.mock.ANY
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

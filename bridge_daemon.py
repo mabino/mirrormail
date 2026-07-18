@@ -83,6 +83,33 @@ def update_sync_state(db_path, m365_email, uid_validity, last_processed_uid):
     finally:
         conn.close()
 
+def ping_healthcheck(url, status="success", message=None):
+    """
+    Sends a ping to healthchecks.io.
+    status can be 'success', 'start', or 'fail'.
+    """
+    if not url:
+        return
+    
+    ping_url = url
+    if status == "start":
+        ping_url = f"{url.rstrip('/')}/start"
+    elif status == "fail":
+        ping_url = f"{url.rstrip('/')}/fail"
+        
+    try:
+        headers = {}
+        data = None
+        if message:
+            data = message.encode('utf-8')
+            headers["Content-Type"] = "text/plain"
+        
+        req = urllib.request.Request(ping_url, data=data, headers=headers, method='POST' if data else 'GET')
+        with urllib.request.urlopen(req, timeout=5) as response:
+            response.read()
+    except Exception as e:
+        print(f"Warning: Failed to send healthcheck ping ({status}): {e}")
+
 def is_email_processed(db_path, m365_email, uid_validity, uid, message_id=None):
     """
     Checks if a message has already been processed using either its UID or Message-ID.
@@ -310,214 +337,231 @@ def sync_emails(config, config_path):
     db_path = config.get("database_path", "email_bridge.db")
     init_db(db_path)
     
-    m365_auth_method = config.get("m365_auth_method", "oauth2")
-    gmail_method = config.get("gmail_auth_method", "oauth2_api")
-    
-    m365_access_token = None
-    if m365_auth_method == "oauth2":
-        print("Refreshing Microsoft 365 token...")
-        m365_access_token = refresh_m365_token(config, config_path)
-    
-    google_access_token = None
-    if gmail_method in ("oauth2_imap", "oauth2_api"):
-        print("Refreshing Google OAuth2 token...")
-        google_access_token = refresh_google_token(config)
-    
-    print(f"Connecting to Microsoft 365 IMAP for {config['m365_email']}...")
-    m365_login_user = config.get("m365_upn", config["m365_email"])
-    if m365_auth_method == "password":
-        m365_imap = connect_m365_password_imap(
-            m365_login_user,
-            config["m365_password"],
-            config.get("m365_imap_server", "localhost"),
-            config.get("m365_imap_port", 1143),
-            config.get("m365_imap_use_ssl", False)
-        )
-    else:
-        m365_imap = connect_m365_imap(m365_login_user, m365_access_token)
-    
-    gmail_imap = None
-    try:
-        if gmail_method != "oauth2_api":
-            print(f"Connecting to Gmail IMAP ({gmail_method}) for {config['gmail_email']}...")
-            if gmail_method == "oauth2_imap":
-                gmail_imap = connect_gmail_oauth_imap(
-                    config["gmail_email"],
-                    google_access_token,
-                    config.get("gmail_imap_server", "imap.gmail.com"),
-                    config.get("gmail_imap_port", 993)
-                )
-            else:
-                gmail_imap = connect_gmail_imap(
-                    config["gmail_email"],
-                    config["gmail_password"],
-                    config.get("gmail_imap_server", "imap.gmail.com"),
-                    config.get("gmail_imap_port", 993)
-                )
+    hc_url = config.get("healthcheck_url")
+    if hc_url:
+        ping_healthcheck(hc_url, "start")
         
+    try:
+        m365_auth_method = config.get("m365_auth_method", "oauth2")
+        gmail_method = config.get("gmail_auth_method", "oauth2_api")
+        
+        m365_access_token = None
+        if m365_auth_method == "oauth2":
+            print("Refreshing Microsoft 365 token...")
+            m365_access_token = refresh_m365_token(config, config_path)
+        
+        google_access_token = None
+        if gmail_method in ("oauth2_imap", "oauth2_api"):
+            print("Refreshing Google OAuth2 token...")
+            google_access_token = refresh_google_token(config)
+        
+        print(f"Connecting to Microsoft 365 IMAP for {config['m365_email']}...")
+        m365_login_user = config.get("m365_upn", config["m365_email"])
+        if m365_auth_method == "password":
+            m365_imap = connect_m365_password_imap(
+                m365_login_user,
+                config["m365_password"],
+                config.get("m365_imap_server", "localhost"),
+                config.get("m365_imap_port", 1143),
+                config.get("m365_imap_use_ssl", False)
+            )
+        else:
+            m365_imap = connect_m365_imap(m365_login_user, m365_access_token)
+        
+        gmail_imap = None
         try:
-            # Retrieve UIDVALIDITY
-            res, status_data = m365_imap.status("INBOX", "(UIDVALIDITY)")
-            if res != 'OK':
-                raise Exception(f"Failed to query INBOX status: {status_data}")
-                
-            response = status_data[0].decode('utf-8', errors='ignore')
-            match = re.search(r'UIDVALIDITY\s+(\d+)', response)
-            if not match:
-                raise Exception(f"Could not parse UIDVALIDITY from: {response}")
-            uid_validity = int(match.group(1))
+            if gmail_method != "oauth2_api":
+                print(f"Connecting to Gmail IMAP ({gmail_method}) for {config['gmail_email']}...")
+                if gmail_method == "oauth2_imap":
+                    gmail_imap = connect_gmail_oauth_imap(
+                        config["gmail_email"],
+                        google_access_token,
+                        config.get("gmail_imap_server", "imap.gmail.com"),
+                        config.get("gmail_imap_port", 993)
+                    )
+                else:
+                    gmail_imap = connect_gmail_imap(
+                        config["gmail_email"],
+                        config["gmail_password"],
+                        config.get("gmail_imap_server", "imap.gmail.com"),
+                        config.get("gmail_imap_port", 993)
+                    )
             
-            # Select INBOX
-            m365_imap.select("INBOX")
-            
-            # Load stored sync state
-            stored_validity, last_processed_uid = get_sync_state(db_path, config["m365_email"])
-            
-            # Retrieve new UIDs based on state
-            if stored_validity == uid_validity and last_processed_uid is not None:
-                # Normal incremental sync
-                print(f"Incremental sync: checking for new messages with UID > {last_processed_uid}...")
-                res, search_data = m365_imap.uid('search', None, f'UID {last_processed_uid + 1}:*')
+            try:
+                # Retrieve UIDVALIDITY
+                res, status_data = m365_imap.status("INBOX", "(UIDVALIDITY)")
                 if res != 'OK':
-                    raise Exception(f"Failed to search INBOX: {search_data}")
-                
-                m365_uids = []
-                if search_data and search_data[0]:
-                    m365_uids = [int(uid) for uid in search_data[0].split()]
-                
-                # Filter out UIDs <= last_processed_uid in case the range search included the boundary
-                m365_uids = [uid for uid in m365_uids if uid > last_processed_uid]
-            else:
-                # First run or UIDVALIDITY mismatch -> Perform Bootstrap
-                print("First run or UIDVALIDITY mismatch. Performing initial bootstrap...")
-                res, search_data = m365_imap.uid('search', None, 'ALL')
-                if res != 'OK':
-                    raise Exception(f"Failed to search INBOX: {search_data}")
-                
-                m365_uids = []
-                if search_data and search_data[0]:
-                    m365_uids = [int(uid) for uid in search_data[0].split()]
-                
-                max_uid = max(m365_uids) if m365_uids else 0
-                print(f"Bootstrapping: marking all {len(m365_uids)} existing emails (up to UID {max_uid}) as processed/ignored.")
-                update_sync_state(db_path, config["m365_email"], uid_validity, max_uid)
-                print("Initial bootstrap complete. Bridge will mirror future incoming emails.")
-                return
-                
-            print(f"Found {len(m365_uids)} new messages in Microsoft 365 INBOX.")
-            
-            copied_count = 0
-            skipped_count = 0
-            
-            for uid in m365_uids:
-                # 1. Quick local DB check by UID
-                if is_email_processed(db_path, config["m365_email"], uid_validity, uid, None):
-                    skipped_count += 1
-                    continue
+                    raise Exception(f"Failed to query INBOX status: {status_data}")
                     
-                # 2. Fetch headers to get Message-ID, FLAGS, INTERNALDATE
-                print(f"Fetching metadata for UID {uid}...")
-                res, fetch_data = m365_imap.uid('fetch', str(uid), '(INTERNALDATE FLAGS BODY[HEADER])')
-                if res != 'OK':
-                    print(f"Error fetching metadata for UID {uid}: {fetch_data}")
-                    continue
+                response = status_data[0].decode('utf-8', errors='ignore')
+                match = re.search(r'UIDVALIDITY\s+(\d+)', response)
+                if not match:
+                    raise Exception(f"Could not parse UIDVALIDITY from: {response}")
+                uid_validity = int(match.group(1))
                 
-                internal_date = None
-                flags = []
-                message_id = None
-                header_text = b""
+                # Select INBOX
+                m365_imap.select("INBOX")
                 
-                for part in fetch_data:
-                    if isinstance(part, tuple):
-                        envelope = part[0].decode('utf-8', errors='ignore')
+                # Load stored sync state
+                stored_validity, last_processed_uid = get_sync_state(db_path, config["m365_email"])
+                
+                # Retrieve new UIDs based on state
+                if stored_validity == uid_validity and last_processed_uid is not None:
+                    # Normal incremental sync
+                    print(f"Incremental sync: checking for new messages with UID > {last_processed_uid}...")
+                    res, search_data = m365_imap.uid('search', None, f'UID {last_processed_uid + 1}:*')
+                    if res != 'OK':
+                        raise Exception(f"Failed to search INBOX: {search_data}")
+                    
+                    m365_uids = []
+                    if search_data and search_data[0]:
+                        m365_uids = [int(uid) for uid in search_data[0].split()]
+                    
+                    # Filter out UIDs <= last_processed_uid in case the range search included the boundary
+                    m365_uids = [uid for uid in m365_uids if uid > last_processed_uid]
+                else:
+                    # First run or UIDVALIDITY mismatch -> Perform Bootstrap
+                    print("First run or UIDVALIDITY mismatch. Performing initial bootstrap...")
+                    res, search_data = m365_imap.uid('search', None, 'ALL')
+                    if res != 'OK':
+                        raise Exception(f"Failed to search INBOX: {search_data}")
+                    
+                    m365_uids = []
+                    if search_data and search_data[0]:
+                        m365_uids = [int(uid) for uid in search_data[0].split()]
+                    
+                    max_uid = max(m365_uids) if m365_uids else 0
+                    print(f"Bootstrapping: marking all {len(m365_uids)} existing emails (up to UID {max_uid}) as processed/ignored.")
+                    update_sync_state(db_path, config["m365_email"], uid_validity, max_uid)
+                    print("Initial bootstrap complete. Bridge will mirror future incoming emails.")
+                    if hc_url:
+                        ping_healthcheck(hc_url, "success")
+                    return
+                    
+                print(f"Found {len(m365_uids)} new messages in Microsoft 365 INBOX.")
+                
+                copied_count = 0
+                skipped_count = 0
+                
+                for uid in m365_uids:
+                    # 1. Quick local DB check by UID
+                    if is_email_processed(db_path, config["m365_email"], uid_validity, uid, None):
+                        skipped_count += 1
+                        continue
                         
-                        # Extract flags
-                        flags_match = re.search(r'FLAGS\s+\(([^)]*)\)', envelope)
-                        if flags_match:
-                            flags = flags_match.group(1).split()
+                    # 2. Fetch headers to get Message-ID, FLAGS, INTERNALDATE
+                    print(f"Fetching metadata for UID {uid}...")
+                    res, fetch_data = m365_imap.uid('fetch', str(uid), '(INTERNALDATE FLAGS BODY[HEADER])')
+                    if res != 'OK':
+                        print(f"Error fetching metadata for UID {uid}: {fetch_data}")
+                        continue
+                    
+                    internal_date = None
+                    flags = []
+                    message_id = None
+                    header_text = b""
+                    
+                    for part in fetch_data:
+                        if isinstance(part, tuple):
+                            envelope = part[0].decode('utf-8', errors='ignore')
                             
-                        # Extract internaldate
-                        date_match = re.search(r'INTERNALDATE\s+"([^"]+)"', envelope)
-                        if date_match:
-                            internal_date = date_match.group(1)
+                            # Extract flags
+                            flags_match = re.search(r'FLAGS\s+\(([^)]*)\)', envelope)
+                            if flags_match:
+                                flags = flags_match.group(1).split()
+                                
+                            # Extract internaldate
+                            date_match = re.search(r'INTERNALDATE\s+"([^"]+)"', envelope)
+                            if date_match:
+                                internal_date = date_match.group(1)
+                                
+                            header_text = part[1]
                             
-                        header_text = part[1]
+                    # Parse message headers to find Message-ID
+                    if header_text:
+                        try:
+                            msg = email.message_from_bytes(header_text)
+                            message_id = msg.get("Message-ID")
+                            if message_id:
+                                message_id = message_id.strip()
+                        except Exception as e:
+                            print(f"Failed to parse headers for UID {uid}: {e}")
+                            
+                    # 3. Check by Message-ID
+                    if message_id and is_email_processed(db_path, config["m365_email"], uid_validity, uid, message_id):
+                        skipped_count += 1
+                        continue
                         
-                # Parse message headers to find Message-ID
-                if header_text:
-                    try:
-                        msg = email.message_from_bytes(header_text)
-                        message_id = msg.get("Message-ID")
-                        if message_id:
-                            message_id = message_id.strip()
-                    except Exception as e:
-                        print(f"Failed to parse headers for UID {uid}: {e}")
+                    # 4. Fetch full message body
+                    print(f"Fetching full message body for UID {uid}...")
+                    res, full_data = m365_imap.uid('fetch', str(uid), '(RFC822)')
+                    if res != 'OK':
+                        print(f"Error fetching full content for UID {uid}: {full_data}")
+                        continue
                         
-                # 3. Check by Message-ID
-                if message_id and is_email_processed(db_path, config["m365_email"], uid_validity, uid, message_id):
-                    skipped_count += 1
-                    continue
+                    raw_bytes = None
+                    for part in full_data:
+                        if isinstance(part, tuple):
+                            raw_bytes = part[1]
+                            break
+                            
+                    if not raw_bytes:
+                        print(f"Empty content returned for UID {uid}")
+                        continue
                     
-                # 4. Fetch full message body
-                print(f"Fetching full message body for UID {uid}...")
-                res, full_data = m365_imap.uid('fetch', str(uid), '(RFC822)')
-                if res != 'OK':
-                    print(f"Error fetching full content for UID {uid}: {full_data}")
-                    continue
-                    
-                raw_bytes = None
-                for part in full_data:
-                    if isinstance(part, tuple):
-                        raw_bytes = part[1]
-                        break
+                    # Copy message depending on configuration
+                    if gmail_method == "oauth2_api":
+                        # REST API Insertion
+                        print(f"Copying UID {uid} (Message-ID: {message_id}) via Gmail REST API...")
+                        try:
+                            msg_api_id = insert_gmail_message_api(google_access_token, raw_bytes, flags)
+                            if msg_api_id:
+                                print(f"Successfully copied UID {uid} (Gmail API ID: {msg_api_id})")
+                                mark_email_processed(db_path, config["m365_email"], uid_validity, uid, message_id)
+                                copied_count += 1
+                            else:
+                                print(f"Failed to copy UID {uid} via Gmail API (no ID returned)")
+                        except Exception as e:
+                            print(f"Failed to insert message via Gmail API: {e}")
+                    else:
+                        # IMAP Append (App Password or OAuth2 IMAP)
+                        flags_str = '(' + ' '.join(flags) + ')' if flags else None
+                        print(f"Copying UID {uid} (Message-ID: {message_id}) to Gmail INBOX...")
+                        append_res, append_data = gmail_imap.append('INBOX', flags_str, internal_date, raw_bytes)
                         
-                if not raw_bytes:
-                    print(f"Empty content returned for UID {uid}")
-                    continue
-                
-                # Copy message depending on configuration
-                if gmail_method == "oauth2_api":
-                    # REST API Insertion
-                    print(f"Copying UID {uid} (Message-ID: {message_id}) via Gmail REST API...")
-                    try:
-                        msg_api_id = insert_gmail_message_api(google_access_token, raw_bytes, flags)
-                        if msg_api_id:
-                            print(f"Successfully copied UID {uid} (Gmail API ID: {msg_api_id})")
+                        if append_res == 'OK':
+                            print(f"Successfully copied UID {uid} to Gmail IMAP")
                             mark_email_processed(db_path, config["m365_email"], uid_validity, uid, message_id)
                             copied_count += 1
                         else:
-                            print(f"Failed to copy UID {uid} via Gmail API (no ID returned)")
-                    except Exception as e:
-                        print(f"Failed to insert message via Gmail API: {e}")
-                else:
-                    # IMAP Append (App Password or OAuth2 IMAP)
-                    flags_str = '(' + ' '.join(flags) + ')' if flags else None
-                    print(f"Copying UID {uid} (Message-ID: {message_id}) to Gmail INBOX...")
-                    append_res, append_data = gmail_imap.append('INBOX', flags_str, internal_date, raw_bytes)
-                    
-                    if append_res == 'OK':
-                        print(f"Successfully copied UID {uid} to Gmail IMAP")
-                        mark_email_processed(db_path, config["m365_email"], uid_validity, uid, message_id)
-                        copied_count += 1
-                    else:
-                        print(f"Failed to append UID {uid} to Gmail: {append_data}")
-                    
-            print(f"Sync complete. Copied: {copied_count}, Skipped: {skipped_count}")
-            if m365_uids:
-                max_processed_uid = max(m365_uids)
-                update_sync_state(db_path, config["m365_email"], uid_validity, max_processed_uid)
-            
+                            print(f"Failed to append UID {uid} to Gmail: {append_data}")
+                        
+                print(f"Sync complete. Copied: {copied_count}, Skipped: {skipped_count}")
+                if m365_uids:
+                    max_processed_uid = max(m365_uids)
+                    update_sync_state(db_path, config["m365_email"], uid_validity, max_processed_uid)
+                
+            finally:
+                if gmail_imap:
+                    try:
+                        gmail_imap.logout()
+                    except Exception:
+                        pass
         finally:
-            if gmail_imap:
-                try:
-                    gmail_imap.logout()
-                except Exception:
-                    pass
-    finally:
-        try:
-            m365_imap.logout()
-        except Exception:
-            pass
+            try:
+                m365_imap.logout()
+            except Exception:
+                pass
+                
+        if hc_url:
+            ping_healthcheck(hc_url, "success")
+            
+    except Exception as e:
+        if hc_url:
+            import traceback
+            err_msg = f"Sync failed: {e}\n\n{traceback.format_exc()}"
+            ping_healthcheck(hc_url, "fail", err_msg)
+        raise e
 
 def main():
     parser = argparse.ArgumentParser(description="Microsoft 365 to Gmail Email Bridge Daemon")
