@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # ==============================================================================
-# deploy_azure.sh - Deploy Mirrormail to Azure Container Instances (ACI)
+# deploy_azure.sh - Bootstrap Azure Resources & Setup Secretless GitOps Flow
 # ==============================================================================
 
 # Color escape codes
@@ -25,21 +25,29 @@ if ! command -v az &> /dev/null; then
 fi
 log_success "Azure CLI is installed."
 
-log_info "Checking Docker installation..."
-if ! command -v docker &> /dev/null; then
-    log_error "Docker is not installed or running."
-    exit 1
-fi
-log_success "Docker is running."
-
 # Verify active login
 log_info "Verifying Azure subscription..."
 if ! az account show &> /dev/null; then
     log_warn "Not logged into Azure. Initiating login flow..."
     az login || { log_error "Failed to log in to Azure."; exit 1; }
 fi
+SUB_ID=$(az account show --query id -o tsv)
+TENANT_ID=$(az account show --query tenantId -o tsv)
 SUB_NAME=$(az account show --query name -o tsv)
 log_success "Using Azure subscription: $SUB_NAME"
+
+# Detect GitHub Repository
+log_info "Detecting GitHub repository remote..."
+GITHUB_REPO=$(git remote get-url origin 2>/dev/null | sed -E 's/.*github.com[:\/]([^.]+)(\.git)?/\1/p')
+if [ -z "$GITHUB_REPO" ]; then
+    log_warn "Could not detect GitHub repository from git remote."
+    read "GITHUB_REPO?Enter your GitHub Repository (e.g. username/repo): "
+    if [ -z "$GITHUB_REPO" ]; then
+        log_error "GitHub repository is required to setup federated credentials."
+        exit 1
+    fi
+fi
+log_success "GitHub Repository detected: $GITHUB_REPO"
 
 # 2. Interactive setup parameters
 RAND_SUFFIX=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 5 2>/dev/null || echo "sync")
@@ -53,7 +61,6 @@ LOCATION=${LOCATION:-eastus}
 
 read "ACR_NAME?Enter Azure Container Registry name [mirrormailacr$RAND_SUFFIX]: "
 ACR_NAME=${ACR_NAME:-mirrormailacr$RAND_SUFFIX}
-# Lowercase only for ACR name
 ACR_NAME=$(echo "$ACR_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 
 read "STORE_NAME?Enter Storage Account name (for SQLite/config) [mirrormailstore$RAND_SUFFIX]: "
@@ -99,7 +106,6 @@ else
     log_success "Storage Account already exists."
 fi
 
-# Get storage key
 STORE_KEY=$(az storage account keys list --resource-group "$RG_NAME" --account-name "$STORE_NAME" --query "[0].value" -o tsv)
 
 log_info "Verifying File Share '$SHARE_NAME'..."
@@ -114,10 +120,8 @@ fi
 
 # Upload config.json
 log_info "Uploading local config.json to the File Share..."
-# Modify database path to point inside the volume mount for container persistence
 tmp_config=$(mktemp)
 cat config.json | sed 's/"database_path": ".*"/"database_path": "\/app\/data\/email_bridge.db"/g' > "$tmp_config"
-
 az storage file upload \
     --account-name "$STORE_NAME" \
     --account-key "$STORE_KEY" \
@@ -127,7 +131,7 @@ az storage file upload \
 rm "$tmp_config"
 log_success "config.json uploaded successfully."
 
-# 5. Create Azure Container Registry (Idempotent)
+# 5. Create Azure Container Registry (ACR)
 log_info "Verifying Container Registry '$ACR_NAME'..."
 ACR_EXISTS=$(az acr check-name --name "$ACR_NAME" --query nameAvailable -o tsv)
 if [ "$ACR_EXISTS" = "true" ]; then
@@ -142,44 +146,137 @@ else
     log_success "ACR already exists."
 fi
 
-# Get ACR credentials
 ACR_LOGIN_SERVER=$(az acr show --name "$ACR_NAME" --query loginServer -o tsv)
-ACR_USERNAME=$(az acr credential show --name "$ACR_NAME" --query username -o tsv)
-ACR_PASSWORD=$(az acr credential show --name "$ACR_NAME" --query passwords[0].value -o tsv)
 
-# 6. Build and Push Docker image
-IMAGE_TAG="$ACR_LOGIN_SERVER/mirrormail:latest"
-log_info "Building Docker image: $IMAGE_TAG..."
-docker build -t "$IMAGE_TAG" . || { log_error "Docker build failed."; exit 1; }
-log_success "Docker image built."
+# 6. Create User-Assigned Managed Identity & Federated Credentials for GitHub Actions
+log_info "Creating User-Assigned Managed Identity 'mirrormail-github-identity'..."
+az identity create --name "mirrormail-github-identity" --resource-group "$RG_NAME" --location "$LOCATION" > /dev/null
+IDENTITY_CLIENT_ID=$(az identity show --name "mirrormail-github-identity" --resource-group "$RG_NAME" --query clientId -o tsv)
+IDENTITY_PRINCIPAL_ID=$(az identity show --name "mirrormail-github-identity" --resource-group "$RG_NAME" --query principalId -o tsv)
 
-log_info "Logging into ACR..."
-az acr login --name "$ACR_NAME" > /dev/null
+log_info "Assigning RBAC Contributor and AcrPush roles to Managed Identity..."
+az role assignment create \
+    --role "Contributor" \
+    --assignee "$IDENTITY_PRINCIPAL_ID" \
+    --scope "/subscriptions/$SUB_ID/resourceGroups/$RG_NAME" > /dev/null 2>&1
 
-log_info "Pushing image to ACR..."
-docker push "$IMAGE_TAG" || { log_error "Docker push failed."; exit 1; }
-log_success "Image pushed to registry."
+az role assignment create \
+    --role "AcrPush" \
+    --assignee "$IDENTITY_PRINCIPAL_ID" \
+    --scope "/subscriptions/$SUB_ID/resourceGroups/$RG_NAME/providers/Microsoft.ContainerRegistry/registries/$ACR_NAME" > /dev/null 2>&1
+log_success "Managed Identity role assignments complete."
 
-# 7. Deploy to ACI with mounts
-log_info "Deploying to Azure Container Instances..."
-# Check if container group already exists, delete if so to make update idempotent
-az container delete --resource-group "$RG_NAME" --name "$CONTAINER_NAME" --yes &> /dev/null
+log_info "Configuring Federated OIDC Credentials for GitHub repo..."
+# Clean up existing federated credential to avoid duplication
+az identity federated-credential delete \
+    --name "mirrormail-github-deploy" \
+    --identity-name "mirrormail-github-identity" \
+    --resource-group "$RG_NAME" --yes &> /dev/null
 
-az container create \
+az identity federated-credential create \
+    --name "mirrormail-github-deploy" \
+    --identity-name "mirrormail-github-identity" \
     --resource-group "$RG_NAME" \
-    --name "$CONTAINER_NAME" \
-    --image "$IMAGE_TAG" \
-    --cpu 1 \
-    --memory 1 \
-    --restart-policy Always \
-    --registry-username "$ACR_USERNAME" \
-    --registry-password "$ACR_PASSWORD" \
-    --azure-file-volume-account-name "$STORE_NAME" \
-    --azure-file-volume-account-key "$STORE_KEY" \
-    --azure-file-volume-share-name "$SHARE_NAME" \
-    --azure-file-volume-mount-path "/app/data" \
-    --command-line "python3 bridge_daemon.py --config /app/data/config.json" > /dev/null
+    --issuer "https://token.actions.githubusercontent.com" \
+    --subject "repo:$GITHUB_REPO:ref:refs/heads/main" \
+    --audiences "api://AzureADTokenExchange" > /dev/null
+log_success "Federated OIDC Credentials configured."
 
-log_success "Mirrormail deployed to Azure Container Instances successfully!"
-log_info "You can view execution logs by running:"
-echo -e "${CYAN}  az container logs --resource-group \"$RG_NAME\" --name \"$CONTAINER_NAME\"${NC}"
+# 7. Generate GitHub Actions Workflow Files
+log_info "Generating GitOps GitHub Actions workflow files..."
+mkdir -p .github/workflows
+
+# Deploy Workflow
+cat << EOF > .github/workflows/deploy-azure.yml
+name: Deploy to Azure (GitOps)
+on:
+  push:
+    branches: [ main ]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        client-id: $IDENTITY_CLIENT_ID
+        tenant-id: $TENANT_ID
+        subscription-id: $SUB_ID
+
+    - name: Build and Push to ACR
+      run: |
+        az acr login --name $ACR_NAME
+        docker build -t $ACR_LOGIN_SERVER/mirrormail:latest .
+        docker push $ACR_LOGIN_SERVER/mirrormail:latest
+
+    - name: Deploy Container to ACI
+      run: |
+        az container delete --resource-group $RG_NAME --name $CONTAINER_NAME --yes || true
+        
+        STORE_KEY=\$(az storage account keys list --resource-group $RG_NAME --account-name $STORE_NAME --query "[0].value" -o tsv)
+        ACR_USERNAME=\$(az acr credential show --name $ACR_NAME --query username -o tsv)
+        ACR_PASSWORD=\$(az acr credential show --name $ACR_NAME --query passwords[0].value -o tsv)
+        
+        az container create \\
+            --resource-group $RG_NAME \\
+            --name $CONTAINER_NAME \\
+            --image $ACR_LOGIN_SERVER/mirrormail:latest \\
+            --cpu 1 \\
+            --memory 1 \\
+            --restart-policy Always \\
+            --registry-username "\$ACR_USERNAME" \\
+            --registry-password "\$ACR_PASSWORD" \\
+            --azure-file-volume-account-name $STORE_NAME \\
+            --azure-file-volume-account-key "\$STORE_KEY" \\
+            --azure-file-volume-share-name $SHARE_NAME \\
+            --azure-file-volume-mount-path "/app/data" \\
+            --command-line "python3 bridge_daemon.py --config /app/data/config.json"
+EOF
+
+# Teardown Workflow
+cat << EOF > .github/workflows/teardown-azure.yml
+name: Teardown Azure Resources
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        client-id: $IDENTITY_CLIENT_ID
+        tenant-id: $TENANT_ID
+        subscription-id: $SUB_ID
+
+    - name: Delete Container Instance
+      run: |
+        az container delete --resource-group $RG_NAME --name $CONTAINER_NAME --yes || true
+
+    - name: Delete Resource Group
+      run: |
+        az group delete --name $RG_NAME --yes || true
+EOF
+
+log_success "GitHub Actions workflow files created successfully!"
+echo -e "  -> .github/workflows/deploy-azure.yml"
+echo -e "  -> .github/workflows/teardown-azure.yml"
+
+log_info "Bootstrap process complete. To deploy the service:"
+echo -e "${YELLOW}1. Commit and push the generated workflow files to GitHub:${NC}"
+echo -e "   git add .github/workflows/"
+echo -e "   git commit -m 'Configure secretless GitOps Azure deployment workflow'"
+echo -e "   git push origin main"
+echo -e "${YELLOW}2. Visit your GitHub Actions tab to view the progress of the first deploy!${NC}"

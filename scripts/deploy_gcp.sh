@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 # ==============================================================================
-# deploy_gcp.sh - Deploy Mirrormail to GCP Cloud Run Jobs + Cloud Scheduler
+# deploy_gcp.sh - Bootstrap GCP Resources & Setup Secretless GitOps Flow
 # ==============================================================================
 
 # Color escape codes
@@ -25,13 +25,6 @@ if ! command -v gcloud &> /dev/null; then
 fi
 log_success "Google Cloud SDK is installed."
 
-log_info "Checking Docker installation..."
-if ! command -v docker &> /dev/null; then
-    log_error "Docker is not installed or running."
-    exit 1
-fi
-log_success "Docker is running."
-
 # Get active project
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
 if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
@@ -44,6 +37,19 @@ if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "(unset)" ]; then
     gcloud config set project "$PROJECT_ID"
 fi
 log_success "Using GCP Project ID: $PROJECT_ID"
+
+# Detect GitHub Repository
+log_info "Detecting GitHub repository remote..."
+GITHUB_REPO=$(git remote get-url origin 2>/dev/null | sed -E 's/.*github.com[:\/]([^.]+)(\.git)?/\1/p')
+if [ -z "$GITHUB_REPO" ]; then
+    log_warn "Could not detect GitHub repository from git remote."
+    read "GITHUB_REPO?Enter your GitHub Repository (e.g. username/repo): "
+    if [ -z "$GITHUB_REPO" ]; then
+        log_error "GitHub repository is required to setup workload identity federation."
+        exit 1
+    fi
+fi
+log_success "GitHub Repository detected: $GITHUB_REPO"
 
 # 2. Interactive setup parameters
 echo -e "\n${CYAN}--- Configure Deployment Parameters ---${NC}"
@@ -68,11 +74,13 @@ if [ ! -f "config.json" ]; then
 fi
 
 # 3. Enable APIs (Idempotent)
-log_info "Enabling required Google APIs (Artifact Registry, Cloud Run, Cloud Scheduler)..."
+log_info "Enabling required Google APIs (Artifact Registry, Cloud Run, Cloud Scheduler, IAM)..."
 gcloud services enable \
     artifactregistry.googleapis.com \
     run.googleapis.com \
-    cloudscheduler.googleapis.com > /dev/null
+    cloudscheduler.googleapis.com \
+    iam.googleapis.com \
+    iamcredentials.googleapis.com > /dev/null
 log_success "Required APIs enabled."
 
 # 4. Create Artifact Registry (Idempotent)
@@ -88,20 +96,7 @@ else
     log_success "Repository already exists."
 fi
 
-# 5. Build and Push Docker image
-IMAGE_TAG="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/mirrormail:latest"
-log_info "Building Docker image: $IMAGE_TAG..."
-docker build -t "$IMAGE_TAG" . || { log_error "Docker build failed."; exit 1; }
-log_success "Docker image built."
-
-log_info "Configuring Docker authentication for GCP..."
-gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet > /dev/null
-
-log_info "Pushing image to Artifact Registry..."
-docker push "$IMAGE_TAG" || { log_error "Docker push failed."; exit 1; }
-log_success "Image pushed to Artifact Registry."
-
-# 6. Create GCS Bucket for persistence
+# 5. Create GCS Bucket for persistence
 log_info "Verifying Storage Bucket 'gs://$BUCKET_NAME'..."
 if ! gcloud storage buckets describe "gs://$BUCKET_NAME" &> /dev/null; then
     log_info "Creating Storage Bucket 'gs://$BUCKET_NAME'..."
@@ -119,38 +114,162 @@ gcloud storage cp "$tmp_config" "gs://$BUCKET_NAME/config.json" > /dev/null
 rm "$tmp_config"
 log_success "config.json uploaded to GCS."
 
-# 7. Deploy Cloud Run Job with Cloud Storage FUSE volume mount
-log_info "Deploying Cloud Run Job '$JOB_NAME'..."
-# Clean up existing job to ensure update is idempotent and applies new volume config
-gcloud run jobs delete "$JOB_NAME" --region="$REGION" --quiet &> /dev/null
+# 6. Configure Workload Identity Federation & Service Account for GitHub Actions
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
 
-gcloud run jobs deploy "$JOB_NAME" \
-    --image "$IMAGE_TAG" \
-    --region "$REGION" \
-    --command "python3" \
-    --args "bridge_daemon.py,--config,/app/data/config.json,--one-shot" \
-    --add-volume="name=data-vol,type=cloud-storage,bucket=$BUCKET_NAME" \
-    --add-volume-mount="volume=data-vol,mount-path=/app/data" > /dev/null
-log_success "Cloud Run Job deployed."
+log_info "Verifying Workload Identity Pool 'mirrormail-pool'..."
+if ! gcloud iam workload-identity-pools describe "mirrormail-pool" --location="global" &> /dev/null; then
+    log_info "Creating Workload Identity Pool 'mirrormail-pool'..."
+    gcloud iam workload-identity-pools create "mirrormail-pool" \
+        --location="global" \
+        --display-name="Mirrormail GitOps Pool" > /dev/null
+else
+    log_success "Workload Identity Pool already exists."
+fi
 
-# 8. Setup Cloud Scheduler trigger (runs every 5 minutes)
-SCHEDULER_JOB_NAME="$JOB_NAME-trigger"
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --query projectNumber --format "value(projectNumber)")
+log_info "Verifying OIDC Provider 'mirrormail-github'..."
+if ! gcloud iam workload-identity-pools providers describe "mirrormail-github" --workload-identity-pool="mirrormail-pool" --location="global" &> /dev/null; then
+    log_info "Creating OIDC Provider 'mirrormail-github'..."
+    gcloud iam workload-identity-pools providers create-oidc "mirrormail-github" \
+        --location="global" \
+        --workload-identity-pool="mirrormail-pool" \
+        --display-name="GitHub Actions Provider" \
+        --attribute-mapping="google.subject=assertion.subject,attribute.repository=assertion.repository" \
+        --issuer-uri="https://token.actions.githubusercontent.com" > /dev/null
+else
+    log_success "OIDC Provider already exists."
+fi
 
-log_info "Verifying Cloud Scheduler trigger '$SCHEDULER_JOB_NAME'..."
-# Check if trigger already exists, delete if so to update it idempotently
-gcloud scheduler jobs delete "$SCHEDULER_JOB_NAME" --location="$REGION" --quiet &> /dev/null
+log_info "Verifying Service Account 'mirrormail-github-sa'..."
+if ! gcloud iam service-accounts describe "mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" &> /dev/null; then
+    log_info "Creating Service Account 'mirrormail-github-sa'..."
+    gcloud iam service-accounts create "mirrormail-github-sa" \
+        --display-name="GitHub Actions Deploy Service Account" > /dev/null
+else
+    log_success "Service Account already exists."
+fi
 
-log_info "Creating Cloud Scheduler trigger to run every 5 minutes..."
-gcloud scheduler jobs create http "$SCHEDULER_JOB_NAME" \
-    --schedule="*/5 * * * *" \
-    --location="$REGION" \
-    --uri="https://$REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/$JOB_NAME:run" \
-    --http-method=POST \
-    --oauth-service-account-email="$PROJECT_NUMBER-compute@developer.gserviceaccount.com" > /dev/null
+log_info "Assigning Roles to Service Account..."
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/run.developer" > /dev/null 2>&1
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/artifactregistry.writer" > /dev/null 2>&1
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/cloudscheduler.admin" > /dev/null 2>&1
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/storage.objectUser" > /dev/null 2>&1
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/iam.serviceAccountUser" > /dev/null 2>&1
+log_success "Roles assigned successfully."
 
-log_success "Cloud Scheduler trigger configured."
-log_success "Mirrormail deployed to GCP successfully!"
-log_info "Your daemon will execute on Cloud Run every 5 minutes, backed by persistent SQLite storage in GCS."
-log_info "To run the job manually now, execute:"
-echo -e "${CYAN}  gcloud run jobs execute $JOB_NAME --region $REGION${NC}"
+log_info "Binding GitHub repository OIDC claims to Service Account..."
+gcloud iam service-accounts add-iam-policy-binding "mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+    --role="roles/iam.workloadIdentityUser" \
+    --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/mirrormail-pool/attribute.repository/$GITHUB_REPO" > /dev/null 2>&1
+log_success "Federated provider bound to Service Account."
+
+# 7. Generate GitHub Actions Workflow Files
+log_info "Generating GitOps GitHub Actions workflow files..."
+mkdir -p .github/workflows
+
+# Deploy Workflow
+cat << EOF > .github/workflows/deploy-gcp.yml
+name: Deploy to GCP (GitOps)
+on:
+  push:
+    branches: [ main ]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Google Auth
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: 'projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/mirrormail-pool/providers/mirrormail-github'
+        service_account: 'mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+
+    - name: Build and Push to Artifact Registry
+      run: |
+        gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+        docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/mirrormail:latest .
+        docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/mirrormail:latest
+
+    - name: Deploy Cloud Run Job
+      run: |
+        gcloud run jobs delete $JOB_NAME --region=$REGION --quiet || true
+        
+        gcloud run jobs deploy $JOB_NAME \
+            --image $REGION-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/mirrormail:latest \
+            --region $REGION \
+            --command "python3" \
+            --args "bridge_daemon.py,--config,/app/data/config.json,--one-shot" \
+            --add-volume="name=data-vol,type=cloud-storage,bucket=$BUCKET_NAME" \
+            --add-volume-mount="volume=data-vol,mount-path=/app/data"
+
+    - name: Configure Cloud Scheduler Trigger
+      run: |
+        gcloud scheduler jobs delete $JOB_NAME-trigger --location=$REGION --quiet || true
+        
+        gcloud scheduler jobs create http $JOB_NAME-trigger \
+            --schedule="*/5 * * * *" \
+            --location="$REGION" \
+            --uri="https://$REGION-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/$JOB_NAME:run" \
+            --http-method=POST \
+            --oauth-service-account-email="mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com"
+EOF
+
+# Teardown Workflow
+cat << EOF > .github/workflows/teardown-gcp.yml
+name: Teardown GCP Resources
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Google Auth
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: 'projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/mirrormail-pool/providers/mirrormail-github'
+        service_account: 'mirrormail-github-sa@$PROJECT_ID.iam.gserviceaccount.com'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+
+    - name: Delete Cloud Scheduler Trigger
+      run: |
+        gcloud scheduler jobs delete $JOB_NAME-trigger --location=$REGION --quiet || true
+
+    - name: Delete Cloud Run Job
+      run: |
+        gcloud run jobs delete $JOB_NAME --region=$REGION --quiet || true
+
+    - name: Delete Cloud Storage Bucket
+      run: |
+        gcloud storage buckets delete gs://$BUCKET_NAME --quiet || true
+
+    - name: Delete Artifact Registry Repository
+      run: |
+        gcloud artifacts repositories delete $REPO_NAME --location=$REGION --quiet || true
+EOF
+
+log_success "GitHub Actions workflow files created successfully!"
+echo -e "  -> .github/workflows/deploy-gcp.yml"
+echo -e "  -> .github/workflows/teardown-gcp.yml"
+
+log_info "Bootstrap process complete. To deploy the service:"
+echo -e "${YELLOW}1. Commit and push the generated workflow files to GitHub:${NC}"
+echo -e "   git add .github/workflows/"
+echo -e "   git commit -m 'Configure secretless GitOps GCP deployment workflow'"
+echo -e "   git push origin main"
+echo -e "${YELLOW}2. Visit your GitHub Actions tab to view the progress of the first deploy!${NC}"
