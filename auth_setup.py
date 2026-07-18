@@ -372,12 +372,23 @@ def run_google_device_flow(client_id, client_secret):
 def configure_bridge(config_path):
     config = load_config(config_path)
     
-    print("\n--- Configure / Update Email Bridge ---")
-    current_m365 = config.get("m365_email", "")
-    if not current_m365 or "YOUR_M365_EMAIL" in current_m365:
-        m365_email = input("Enter Microsoft 365 email: ").strip()
+    current_upn = config.get("m365_upn", config.get("m365_email", ""))
+    if not current_upn or "YOUR_M365_EMAIL" in current_upn:
+        m365_upn = input("Enter Microsoft 365 User Principal Name (UPN) / Login Email: ").strip()
     else:
-        m365_email = input(f"Enter Microsoft 365 email [{current_m365}]: ").strip() or current_m365
+        m365_upn = input(f"Enter Microsoft 365 User Principal Name (UPN) / Login Email [{current_upn}]: ").strip() or current_upn
+
+    current_email = config.get("m365_email", m365_upn)
+    is_same_default = "y" if current_email == m365_upn else "n"
+    same_prompt = input(f"Is your primary email address the same as your UPN ({m365_upn})? (y/n) [{is_same_default}]: ").strip().lower() or is_same_default
+    
+    if same_prompt == "y":
+        m365_email = m365_upn
+    else:
+        if current_email == m365_upn:
+            m365_email = input("Enter primary Microsoft 365 email address: ").strip()
+        else:
+            m365_email = input(f"Enter primary Microsoft 365 email address [{current_email}]: ").strip() or current_email
 
     current_gmail = config.get("gmail_email", "")
     if not current_gmail or "YOUR_GMAIL_EMAIL" in current_gmail:
@@ -385,10 +396,11 @@ def configure_bridge(config_path):
     else:
         gmail_email = input(f"Enter Gmail email [{current_gmail}]: ").strip() or current_gmail
 
-    if not m365_email or not gmail_email:
-        print("Error: Microsoft 365 and Gmail emails are required.")
+    if not m365_upn or not m365_email or not gmail_email:
+        print("Error: Microsoft 365 UPN, email, and Gmail email are required.")
         sys.exit(1)
 
+    config["m365_upn"] = m365_upn
     config["m365_email"] = m365_email
     config["gmail_email"] = gmail_email
 
@@ -475,7 +487,7 @@ def configure_bridge(config_path):
         if config["m365_client_id"] in ("YOUR_CLIENT_ID", "9a5bf30c-26d2-43fb-ab89-40c2136d88b4", "9e5f94bc-e8a4-4e73-b8be-63364c29d753", ""):
             config["m365_client_id"] = CLIENT_ID_M365
 
-        default_tenant = get_m365_tenant(m365_email)
+        default_tenant = get_m365_tenant(m365_upn)
         current_tenant = config.get("m365_tenant", default_tenant)
         m365_tenant = input(f"Enter Microsoft 365 Tenant ID or domain [{current_tenant}]: ").strip() or current_tenant
         config["m365_tenant"] = m365_tenant

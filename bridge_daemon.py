@@ -324,16 +324,17 @@ def sync_emails(config, config_path):
         google_access_token = refresh_google_token(config)
     
     print(f"Connecting to Microsoft 365 IMAP for {config['m365_email']}...")
+    m365_login_user = config.get("m365_upn", config["m365_email"])
     if m365_auth_method == "password":
         m365_imap = connect_m365_password_imap(
-            config["m365_email"],
+            m365_login_user,
             config["m365_password"],
             config.get("m365_imap_server", "localhost"),
             config.get("m365_imap_port", 1143),
             config.get("m365_imap_use_ssl", False)
         )
     else:
-        m365_imap = connect_m365_imap(config["m365_email"], m365_access_token)
+        m365_imap = connect_m365_imap(m365_login_user, m365_access_token)
     
     gmail_imap = None
     try:

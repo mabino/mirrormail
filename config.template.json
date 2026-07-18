@@ -1,6 +1,7 @@
 {
     "m365_client_id": "d3590ed6-52b3-4102-aeff-aad2292ab01c",
     "m365_tenant": "organizations",
+    "m365_upn": "YOUR_M365_UPN@outlook.com",
     "m365_email": "YOUR_M365_EMAIL@outlook.com",
     "m365_refresh_token": "",
     "gmail_email": "YOUR_GMAIL_EMAIL@gmail.com",
