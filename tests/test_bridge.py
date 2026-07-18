@@ -4,11 +4,12 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import bridge_daemon
+import auth_setup
 
 class TestBridgeDaemon(unittest.TestCase):
     def setUp(self):
@@ -210,6 +211,139 @@ class TestBridgeDaemon(unittest.TestCase):
             []
         )
         self.assertTrue(bridge_daemon.is_email_processed(self.db_path, "m365@example.com", 200, 99, "<oauth-id-456>"))
+
+
+class TestM365AuthCodeFlow(unittest.TestCase):
+    """Tests for the M365 Authorization Code Flow (the only supported M365 auth method)."""
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='https://login.microsoftonline.com/common/oauth2/nativeclient?code=AUTH_CODE_XYZ&state=12345')
+    def test_auth_code_flow_success(self, mock_input, mock_urlopen):
+        """Test successful authorization code exchange returns refresh token."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "access_token": "at_123",
+            "refresh_token": "rt_456"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        result = auth_setup.run_m365_auth_code_flow("test_client_id", "example.edu")
+
+        self.assertEqual(result, "rt_456")
+        # Verify the token exchange request was made
+        called_req = mock_urlopen.call_args[0][0]
+        self.assertIn("example.edu", called_req.full_url)
+        self.assertEqual(called_req.method, "POST")
+        body = called_req.data.decode('utf-8')
+        self.assertIn("grant_type=authorization_code", body)
+        self.assertIn("code=AUTH_CODE_XYZ", body)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='https://login.microsoftonline.com/common/oauth2/nativeclient?code=CODE_ABC&state=12345')
+    def test_auth_code_flow_no_refresh_token(self, mock_input, mock_urlopen):
+        """Test that None is returned when response lacks a refresh token."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "access_token": "at_only"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        result = auth_setup.run_m365_auth_code_flow("test_client_id", "example.edu")
+
+        self.assertIsNone(result)
+
+    @patch('builtins.input', return_value='')
+    def test_auth_code_flow_empty_input(self, mock_input):
+        """Test that empty user input returns None."""
+        result = auth_setup.run_m365_auth_code_flow("test_client_id", "example.edu")
+        self.assertIsNone(result)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='https://login.microsoftonline.com/common/oauth2/nativeclient?code=CODE_ERR&state=12345')
+    def test_auth_code_flow_http_error(self, mock_input, mock_urlopen):
+        """Test that HTTP errors during token exchange return None."""
+        mock_error = MagicMock()
+        mock_error.code = 400
+        mock_error.reason = "Bad Request"
+        mock_error.read.return_value = b'{"error":"invalid_grant"}'
+        mock_urlopen.side_effect = __import__('urllib.error', fromlist=['HTTPError']).HTTPError(
+            url="https://login.microsoftonline.com/example.edu/oauth2/v2.0/token",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=MagicMock(read=lambda: b'{"error":"invalid_grant"}')
+        )
+
+        result = auth_setup.run_m365_auth_code_flow("test_client_id", "example.edu")
+        self.assertIsNone(result)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='BARE_CODE_ONLY')
+    def test_auth_code_flow_bare_code_input(self, mock_input, mock_urlopen):
+        """Test that a bare authorization code (not a full URL) is handled."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "access_token": "at_bare",
+            "refresh_token": "rt_bare"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        result = auth_setup.run_m365_auth_code_flow("test_client_id", "example.edu")
+
+        self.assertEqual(result, "rt_bare")
+        # Verify the bare code was sent as-is
+        called_req = mock_urlopen.call_args[0][0]
+        body = called_req.data.decode('utf-8')
+        self.assertIn("code=BARE_CODE_ONLY", body)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='https://login.microsoftonline.com/common/oauth2/nativeclient?code=CODE_NET&state=12345')
+    def test_auth_code_flow_network_error(self, mock_input, mock_urlopen):
+        """Test that generic exceptions during token exchange return None."""
+        mock_urlopen.side_effect = Exception("Network timeout")
+
+        result = auth_setup.run_m365_auth_code_flow("test_client_id", "example.edu")
+        self.assertIsNone(result)
+
+
+class TestAuthSetupHelpers(unittest.TestCase):
+    """Tests for auth_setup helper functions."""
+
+    def test_get_m365_tenant_custom_domain(self):
+        """Custom org domains should return the domain itself."""
+        self.assertEqual(auth_setup.get_m365_tenant("user@princeton.edu"), "princeton.edu")
+        self.assertEqual(auth_setup.get_m365_tenant("admin@contoso.com"), "contoso.com")
+
+    def test_get_m365_tenant_consumer_domains(self):
+        """Personal Microsoft accounts should return 'consumers'."""
+        for domain in ("outlook.com", "hotmail.com", "live.com", "msn.com"):
+            self.assertEqual(auth_setup.get_m365_tenant(f"user@{domain}"), "consumers")
+
+    def test_get_m365_tenant_missing_email(self):
+        """Empty or invalid emails should fall back to 'organizations'."""
+        self.assertEqual(auth_setup.get_m365_tenant(""), "organizations")
+        self.assertEqual(auth_setup.get_m365_tenant(None), "organizations")
+        self.assertEqual(auth_setup.get_m365_tenant("no-at-sign"), "organizations")
+
+    def test_load_config_missing_file(self):
+        """Loading a nonexistent config should return an empty dict."""
+        result = auth_setup.load_config("/nonexistent/path/config.json")
+        self.assertEqual(result, {})
+
+    def test_load_and_save_config(self):
+        """Config round-trip through save and load."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "test_config.json")
+            data = {"m365_email": "test@example.com", "sync_interval_seconds": 60}
+            auth_setup.save_config(data, path)
+            loaded = auth_setup.load_config(path)
+            self.assertEqual(loaded["m365_email"], "test@example.com")
+            self.assertEqual(loaded["sync_interval_seconds"], 60)
+
+    def test_device_code_flow_still_available(self):
+        """Verify that run_m365_device_flow is still available as a secondary option."""
+        self.assertTrue(hasattr(auth_setup, 'run_m365_device_flow'))
+
 
 if __name__ == '__main__':
     unittest.main()

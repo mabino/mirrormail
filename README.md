@@ -1,6 +1,6 @@
 # Microsoft 365 to Gmail Email Bridge Daemon
 
-A lightweight Python service that synchronizes emails from a Microsoft 365 inbox to a Gmail account. It uses the Microsoft Device Code Flow (via Microsoft Office's approved first-party Client ID) for Outlook, and supports either standard App Passwords or Google OAuth2 (Device Flow) for Gmail.
+A lightweight Python service that synchronizes emails from a Microsoft 365 inbox to a Gmail account. It uses the Microsoft Authorization Code Flow by default (via Microsoft Office's approved first-party Client ID) for Outlook, with Device Code Flow available as a fallback, and supports either standard App Passwords or Google OAuth2 (Device Flow) for Gmail.
 
 ---
 
@@ -22,11 +22,9 @@ python auth_setup.py
 *   Select option **`[1] Setup / Reconfigure`**.
 *   Enter your **Microsoft 365 email** and **Gmail email**.
 *   Select Gmail authentication method **`[1] App Password`** and paste the **16-character code** you generated.
-*   The script will print a link and code for Microsoft:
-    ```text
-    To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code C8H2J8K9L to authenticate.
-    ```
-*   Open the link in your browser, paste the code, and sign in with your M365 account to authorize IMAP access.
+*   The script will print a URL for Microsoft authentication.
+*   Open the URL in your browser, sign in with your M365 account, and after a successful login you will be redirected to a blank page.
+*   Copy the entire URL from the address bar and paste it back into the terminal to complete authorization.
 
 ### 3. Run the Sync Daemon
 ```bash
@@ -50,8 +48,8 @@ graph TD
         B -->|Option 3: HTTP POST / Gmail REST API| E2[Gmail API Server]
     end
 
-    F[auth_setup.py] -->|Device Code Flows| A
-    F -->|Device Code Flows| E2
+    F[auth_setup.py] -->|Auth Code Flow| A
+    F -->|Device Code Flow| E2
     F -->|Write Tokens & Auth Method| C
 ```
 
@@ -63,7 +61,7 @@ graph TD
   - **App Password (Default)**: Connects using your username and App Password.
   - **Google OAuth2 (REST API)**: Connects via Google's `users.messages.insert` API endpoint using short-lived OAuth2 access tokens and a base64url payload. Highly recommended for workspace users.
   - **Google OAuth2 (IMAP XOAUTH2)**: Connects to Gmail IMAP server using SASL XOAUTH2.
-- **Device Code Flow Authentication**: Authenticate securely to M365 and Google without custom web redirects.
+- **Flexible M365 Authentication**: Authorization Code Flow (recommended, works with device compliance policies) or Device Code Flow (alternative for environments without browser redirect support).
 - **Robust State Tracking**: Leverages a local SQLite database to track processed UIDs and `Message-ID` headers, completely avoiding duplicate delivery to Gmail.
 - **Dual Runtime Modes**: Run either as a one-shot task (ideal for `cron` scheduler) or as an active background loop daemon.
 - **Zero Third-Party Runtime Dependencies**: The daemon runs entirely using Python's standard library. Only `pytest` is required for testing.
@@ -93,7 +91,7 @@ python auth_setup.py
 ```
 This utility provides an interactive menu:
 
-*   **`[1] Setup / Reconfigure Email Bridge`**: Creates or updates configuration, prompts for credentials, and runs Microsoft and Google Device Code Flow authentications.
+*   **`[1] Setup / Reconfigure Email Bridge`**: Creates or updates configuration, prompts for credentials, and runs Microsoft (Authorization Code or Device Code Flow) and Google Device Code Flow authentications.
 *   **`[2] Tear Down / Reset`**: Prompts for confirmation and deletes the local configuration file (`config.json`) and the SQLite tracking databases (`email_bridge.db*`), fully clearing the local footprint.
 
 ---
@@ -159,7 +157,7 @@ The SQLite database tracks synchronized emails under the `processed_emails` tabl
 To reverse the direction of synchronization (from Gmail to Microsoft 365), the following changes would be required:
 
 1. **Authentication Expansion**:
-   - The Microsoft 365 connection would still use `auth_setup.py` (Device Code Flow) but we would need the IMAP folder write permission scope: `https://outlook.office.com/IMAP.AccessAsUser.All`. (This is already included in our current scope).
+   - The Microsoft 365 connection would still use `auth_setup.py` (Authorization Code Flow) but we would need the IMAP folder write permission scope: `https://outlook.office.com/IMAP.AccessAsUser.All`. (This is already included in our current scope).
    - Gmail IMAP login would read emails instead of appending. Since Gmail is the source, standard IMAP `uid search` and header parsing would be performed on the Gmail IMAP connection.
 2. **Synchronizing Engine Modifications**:
    - Read from Gmail's `INBOX`.

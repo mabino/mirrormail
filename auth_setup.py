@@ -46,7 +46,7 @@ def get_m365_tenant(email_addr):
     return domain
 
 def run_m365_auth_code_flow(client_id, tenant):
-    print(f"\n--- Initiating Microsoft 365 Authentication (Browser Copy-Paste Flow) ---")
+    print(f"\n--- Initiating Microsoft 365 Authentication (Authorization Code Flow) ---")
     redirect_uri = "https://login.microsoftonline.com/common/oauth2/nativeclient"
     auth_params = {
         "client_id": client_id,
@@ -61,9 +61,9 @@ def run_m365_auth_code_flow(client_id, tenant):
     
     print("\n==========================================================================")
     print("INSTRUCTIONS:")
-    print("1. Open the following URL in your Princeton-managed web browser:")
+    print("1. Open the following URL in your web browser:")
     print(f"\n{auth_url}")
-    print("\n2. Log in with your Princeton M365 account. Because this login occurs in your")
+    print("\n2. Log in with your Microsoft 365 account. Because this login occurs in your")
     print("   native browser, any device compliance and MFA checks will succeed.")
     print("3. After a successful login, the browser will redirect to a blank page starting with:")
     print(f"   {redirect_uri}?code=...")
@@ -384,8 +384,8 @@ def configure_bridge(config_path):
 
     # Choose Microsoft 365 Authentication Flow
     print("\nMicrosoft 365 Authentication Flow Options:")
-    print(" [1] Browser Copy-Paste Flow (Recommended - evaluates device compliance)")
-    print(" [2] Device Code Flow (Alternative - fails if Princeton blocks device-less flows)")
+    print(" [1] Authorization Code Flow (Recommended - works with device compliance policies)")
+    print(" [2] Device Code Flow (Alternative - may be blocked by some organizations)")
     flow_choice = input("Choose M365 authentication flow [default: 1]: ").strip()
     
     if flow_choice == "2":
