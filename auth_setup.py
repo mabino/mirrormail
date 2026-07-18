@@ -223,6 +223,78 @@ def run_m365_device_flow(client_id, tenant):
             print(f"\nAn error occurred while polling: {e}")
             return None
 
+def run_google_auth_code_flow(client_id, client_secret):
+    print(f"\n--- Initiating Google OAuth2 Authentication (Browser Copy-Paste Flow) ---")
+    redirect_uri = "http://localhost"
+    auth_params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": "https://mail.google.com/ https://www.googleapis.com/auth/gmail.insert",
+        "access_type": "offline",
+        "prompt": "consent"
+    }
+    
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(auth_params)
+    
+    print("\n==========================================================================")
+    print("INSTRUCTIONS:")
+    print("1. Open the following URL in your web browser:")
+    print(f"\n{auth_url}")
+    print("\n2. Log in with your Google account and grant the requested permissions.")
+    print("3. After a successful login, the browser will redirect to a local address")
+    print("   (e.g., http://localhost/?code=...) which may show an error/blank page.")
+    print("4. Copy the entire URL from your browser's address bar and paste it below.")
+    print("==========================================================================\n")
+    
+    redirected_url = input("Paste the redirected URL here: ").strip()
+    if not redirected_url:
+        print("Error: No input received.")
+        return None
+        
+    code = None
+    match = re.search(r"[?&]code=([^&]+)", redirected_url)
+    if match:
+        code = match.group(1)
+        code = urllib.parse.unquote(code)
+    else:
+        code = redirected_url
+        
+    # Exchange code for tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "redirect_uri": redirect_uri
+    }
+    data = urllib.parse.urlencode(payload).encode('utf-8')
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    req = urllib.request.Request(token_url, data=data, headers=headers, method='POST')
+    
+    try:
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+        refresh_token = res_data.get("refresh_token")
+        if refresh_token:
+            print("Google authentication successful!")
+            return refresh_token
+        else:
+            print("Warning: Google login succeeded, but no refresh token was returned.")
+            access_token = res_data.get("access_token")
+            return access_token
+    except urllib.error.HTTPError as e:
+        print(f"Error exchanging Google authorization code: HTTP Error {e.code}: {e.reason}")
+        try:
+            print("Details:", e.read().decode('utf-8'))
+        except Exception:
+            pass
+        return None
+    except Exception as e:
+        print(f"Error exchanging Google authorization code: {e}")
+        return None
+
 def run_google_device_flow(client_id, client_secret):
     print("\n--- Initiating Google OAuth2 Authentication ---")
     device_code_url = "https://oauth2.googleapis.com/device/code"
@@ -367,7 +439,16 @@ def configure_bridge(config_path):
         config["gmail_client_id"] = gmail_client_id
         config["gmail_client_secret"] = gmail_client_secret
         
-        gmail_refresh = run_google_device_flow(gmail_client_id, gmail_client_secret)
+        print("\nGoogle OAuth2 Flow Options:")
+        print(" [1] Browser Copy-Paste Flow (Recommended - works for sensitive scopes)")
+        print(" [2] Device Code Flow (Alternative - fails if Google blocks sensitive scopes)")
+        g_flow_choice = input("Choose Google authentication flow [default: 1]: ").strip()
+        
+        if g_flow_choice == "2":
+            gmail_refresh = run_google_device_flow(gmail_client_id, gmail_client_secret)
+        else:
+            gmail_refresh = run_google_auth_code_flow(gmail_client_id, gmail_client_secret)
+            
         if not gmail_refresh:
             print("Error: Failed to obtain Google OAuth2 refresh token.")
             sys.exit(1)

@@ -68,7 +68,7 @@ graph TD
   - **DavMail Sidecar**: Connect via a local DavMail IMAP proxy (ideal for organizations with strict enterprise conditional access or managed DavMail gateways).
 - **Flexible Gmail Authentications**:
   - **App Password (Default)**: Connects using your username and App Password.
-  - **Google OAuth2 (REST API)**: Connects via Google's `users.messages.insert` API endpoint using short-lived OAuth2 access tokens and a base64url payload. Highly recommended for workspace users.
+  - **Google OAuth2 (REST API)**: Connects via Google's `users.messages.insert` API endpoint using Browser Copy-Paste Flow (recommended) or Device Code Flow to obtain OAuth2 tokens.
   - **Google OAuth2 (IMAP XOAUTH2)**: Connects to Gmail IMAP server using SASL XOAUTH2.
 - **Robust State Tracking**: Leverages a local SQLite database to track processed UIDs and `Message-ID` headers, completely avoiding duplicate delivery to Gmail.
 - **Dual Runtime Modes**: Run either as a one-shot task (ideal for `cron` scheduler) or as an active background loop daemon.

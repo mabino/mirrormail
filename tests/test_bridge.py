@@ -306,6 +306,78 @@ class TestM365AuthCodeFlow(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestGoogleAuthCodeFlow(unittest.TestCase):
+    """Tests for the Google OAuth2 Authorization Code Flow."""
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='http://localhost/?code=G_CODE_123&state=abc')
+    def test_google_auth_code_flow_success(self, mock_input, mock_urlopen):
+        """Test successful Google token exchange returns refresh token."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "access_token": "g_at_123",
+            "refresh_token": "g_rt_456"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        result = auth_setup.run_google_auth_code_flow("google_id", "google_secret")
+
+        self.assertEqual(result, "g_rt_456")
+        called_req = mock_urlopen.call_args[0][0]
+        self.assertEqual(called_req.full_url, "https://oauth2.googleapis.com/token")
+        self.assertEqual(called_req.method, "POST")
+        body = called_req.data.decode('utf-8')
+        self.assertIn("grant_type=authorization_code", body)
+        self.assertIn("code=G_CODE_123", body)
+        self.assertIn("client_id=google_id", body)
+        self.assertIn("client_secret=google_secret", body)
+        self.assertIn("redirect_uri=http%3A%2F%2Flocalhost", body)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='http://localhost/?code=G_CODE_456')
+    def test_google_auth_code_flow_no_refresh_token(self, mock_input, mock_urlopen):
+        """Test that access token is returned as fallback if refresh token is missing."""
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "access_token": "g_at_only"
+        }).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        result = auth_setup.run_google_auth_code_flow("google_id", "google_secret")
+
+        self.assertEqual(result, "g_at_only")
+
+    @patch('builtins.input', return_value='')
+    def test_google_auth_code_flow_empty_input(self, mock_input):
+        """Test that empty input returns None."""
+        result = auth_setup.run_google_auth_code_flow("google_id", "google_secret")
+        self.assertIsNone(result)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='http://localhost/?code=G_CODE_ERR')
+    def test_google_auth_code_flow_http_error(self, mock_input, mock_urlopen):
+        """Test that HTTP errors return None."""
+        mock_urlopen.side_effect = __import__('urllib.error', fromlist=['HTTPError']).HTTPError(
+            url="https://oauth2.googleapis.com/token",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=MagicMock(read=lambda: b'{"error":"invalid_grant"}')
+        )
+
+        result = auth_setup.run_google_auth_code_flow("google_id", "google_secret")
+        self.assertIsNone(result)
+
+    @patch('urllib.request.urlopen')
+    @patch('builtins.input', return_value='http://localhost/?code=G_CODE_NET')
+    def test_google_auth_code_flow_network_error(self, mock_input, mock_urlopen):
+        """Test that general exceptions return None."""
+        mock_urlopen.side_effect = Exception("Connection closed")
+
+        result = auth_setup.run_google_auth_code_flow("google_id", "google_secret")
+        self.assertIsNone(result)
+
+
 class TestAuthSetupHelpers(unittest.TestCase):
     """Tests for auth_setup helper functions."""
 
