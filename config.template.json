@@ -4,7 +4,7 @@
     "m365_email": "YOUR_M365_EMAIL@outlook.com",
     "m365_refresh_token": "",
     "gmail_email": "YOUR_GMAIL_EMAIL@gmail.com",
-    "gmail_auth_method": "app_password",
+    "gmail_auth_method": "oauth2_api",
     "gmail_password": "YOUR_GMAIL_APP_PASSWORD",
     "gmail_imap_server": "imap.gmail.com",
     "gmail_imap_port": 993,

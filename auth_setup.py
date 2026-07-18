@@ -392,21 +392,21 @@ def configure_bridge(config_path):
     config["m365_email"] = m365_email
     config["gmail_email"] = gmail_email
 
-    current_method = config.get("gmail_auth_method", "app_password")
+    current_method = config.get("gmail_auth_method", "oauth2_api")
     print("\nGmail Authentication Methods:")
-    print(" [1] App Password (Default, simple, recommended for personal accounts)")
-    print(" [2] Google OAuth2 REST API (Requires GCP project, client ID/secret)")
-    print(" [3] Google OAuth2 IMAP XOAUTH2 (Requires GCP project, client ID/secret)")
+    print(" [1] Google OAuth2 REST API (Default, recommended - uses secure REST API)")
+    print(" [2] Google OAuth2 IMAP XOAUTH2 (Secure - connects via OAuth2 IMAP)")
+    print(" [3] App Password (Legacy, less secure - uses static 16-character password)")
     
-    choice = input(f"Choose authentication method [default: {current_method}]: ").strip()
+    choice = input(f"Choose authentication method [default: {'1' if current_method == 'oauth2_api' else '2' if current_method == 'oauth2_imap' else '3'}]: ").strip()
     
     auth_method = current_method
     if choice == "1":
-        auth_method = "app_password"
-    elif choice == "2":
         auth_method = "oauth2_api"
-    elif choice == "3":
+    elif choice == "2":
         auth_method = "oauth2_imap"
+    elif choice == "3":
+        auth_method = "app_password"
 
     config["gmail_auth_method"] = auth_method
 

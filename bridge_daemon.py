@@ -269,7 +269,7 @@ def sync_emails(config, config_path):
     init_db(db_path)
     
     m365_auth_method = config.get("m365_auth_method", "oauth2")
-    gmail_method = config.get("gmail_auth_method", "app_password")
+    gmail_method = config.get("gmail_auth_method", "oauth2_api")
     
     m365_access_token = None
     if m365_auth_method == "oauth2":
@@ -469,7 +469,7 @@ def main():
         sys.exit(1)
         
     m365_auth_method = config.get("m365_auth_method", "oauth2")
-    gmail_method = config.get("gmail_auth_method", "app_password")
+    gmail_method = config.get("gmail_auth_method", "oauth2_api")
     
     # Verify required keys dynamically based on auth method
     required_keys = ["m365_email", "gmail_email"]
