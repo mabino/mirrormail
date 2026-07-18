@@ -38,7 +38,13 @@ python bridge_daemon.py
 
 ```mermaid
 graph TD
-    A[M365 IMAP Server] -->|SASL XOAUTH2| B[bridge_daemon.py]
+    subgraph M365 Input Flows
+        A1[M365 IMAP Server]
+        A2[DavMail Sidecar]
+    end
+
+    A1 -->|Direct SASL XOAUTH2| B[bridge_daemon.py]
+    A2 -->|Local IMAP Login| B
     C[config.json] -->|Load Tokens/Creds| B
     B -->|sqlite3: check UID / Message-ID| D[(email_bridge.db)]
     
@@ -48,20 +54,22 @@ graph TD
         B -->|Option 3: HTTP POST / Gmail REST API| E2[Gmail API Server]
     end
 
-    F[auth_setup.py] -->|Auth Code Flow| A
-    F -->|Device Code Flow| E2
-    F -->|Write Tokens & Auth Method| C
+    F[auth_setup.py] -->|Direct Auth Flows| A1
+    F -->|Write Tokens/Creds| C
+    A2 -.->|Translates EWS/Graph APIs| A1
 ```
 
 ---
 
 ## Features
 
+- **Flexible M365 Connections**:
+  - **Direct OAuth2**: Authenticate directly with M365 via Authorization Code Flow or Device Code Flow.
+  - **DavMail Sidecar**: Connect via a local DavMail IMAP proxy (ideal for organizations with strict enterprise conditional access or managed DavMail gateways).
 - **Flexible Gmail Authentications**:
   - **App Password (Default)**: Connects using your username and App Password.
   - **Google OAuth2 (REST API)**: Connects via Google's `users.messages.insert` API endpoint using short-lived OAuth2 access tokens and a base64url payload. Highly recommended for workspace users.
   - **Google OAuth2 (IMAP XOAUTH2)**: Connects to Gmail IMAP server using SASL XOAUTH2.
-- **Flexible M365 Authentication**: Authorization Code Flow (recommended, works with device compliance policies) or Device Code Flow (alternative for environments without browser redirect support).
 - **Robust State Tracking**: Leverages a local SQLite database to track processed UIDs and `Message-ID` headers, completely avoiding duplicate delivery to Gmail.
 - **Dual Runtime Modes**: Run either as a one-shot task (ideal for `cron` scheduler) or as an active background loop daemon.
 - **Zero Third-Party Runtime Dependencies**: The daemon runs entirely using Python's standard library. Only `pytest` is required for testing.
@@ -149,6 +157,44 @@ The SQLite database tracks synchronized emails under the `processed_emails` tabl
 
 > [!NOTE]
 > Even if the mail server resets its UID numbers (triggering a change in `uid_validity`), the bridge remains duplicate-free by verifying the `Message-ID` header as a secondary safety guard.
+
+---
+
+## 🚀 Setup with DavMail Sidecar Proxy (O365)
+
+If your organization has authorized/requires the use of DavMail, you can run it as a local sidecar service. DavMail acts as a secure translator, converting local standard IMAP login requests into Microsoft Graph or Exchange Web Services (EWS) API calls using modern OAuth2 authentication.
+
+### 1. Configure DavMail
+We provide a pre-configured template `davmail.properties` in the root of the repository.
+* The default authentication mode is `O365DeviceCode`, which is headless-friendly.
+* When DavMail starts or requires authentication, it prints the Microsoft device login link and code to the container logs.
+
+### 2. Start the Sidecar Service
+Bring up the DavMail sidecar using Docker Compose:
+```bash
+docker-compose up -d davmail
+```
+
+### 3. Authenticate with DavMail
+Check the container logs to find the device authentication message:
+```bash
+docker logs davmail
+```
+Look for a line like:
+```text
+To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code C8H2J8K9L to authenticate.
+```
+Open the link, input the code, and authenticate with your M365 credentials. Once complete, DavMail automatically caches the OAuth2 refresh tokens back into the local `davmail.properties` file.
+
+### 4. Configure the Email Bridge
+Run the configuration utility:
+```bash
+python auth_setup.py
+```
+* Under M365 connection method, select **`[2] DavMail Sidecar Proxy`**.
+* Enter `davmail` (if running inside Docker) or `localhost` (if running daemon locally) as the IMAP server.
+* Use `1143` as the IMAP port and select `n` for SSL (connections inside the local Docker network are unencrypted; DavMail connects to Microsoft securely using HTTPS).
+* Enter the password that decrypts the DavMail modern token store.
 
 ---
 

@@ -317,16 +317,8 @@ def configure_bridge(config_path):
         print("Error: Microsoft 365 and Gmail emails are required.")
         sys.exit(1)
 
-    config["m365_client_id"] = config.get("m365_client_id") or CLIENT_ID_M365
-    if config["m365_client_id"] in ("YOUR_CLIENT_ID", "9a5bf30c-26d2-43fb-ab89-40c2136d88b4", "9e5f94bc-e8a4-4e73-b8be-63364c29d753", ""):
-        config["m365_client_id"] = CLIENT_ID_M365
     config["m365_email"] = m365_email
     config["gmail_email"] = gmail_email
-
-    default_tenant = get_m365_tenant(m365_email)
-    current_tenant = config.get("m365_tenant", default_tenant)
-    m365_tenant = input(f"Enter Microsoft 365 Tenant ID or domain [{current_tenant}]: ").strip() or current_tenant
-    config["m365_tenant"] = m365_tenant
 
     current_method = config.get("gmail_auth_method", "app_password")
     print("\nGmail Authentication Methods:")
@@ -382,21 +374,84 @@ def configure_bridge(config_path):
         config["gmail_refresh_token"] = gmail_refresh
         config.pop("gmail_password", None)
 
-    # Choose Microsoft 365 Authentication Flow
-    print("\nMicrosoft 365 Authentication Flow Options:")
-    print(" [1] Authorization Code Flow (Recommended - works with device compliance policies)")
-    print(" [2] Device Code Flow (Alternative - may be blocked by some organizations)")
-    flow_choice = input("Choose M365 authentication flow [default: 1]: ").strip()
+    # Choose Microsoft 365 Connection / Authentication Method
+    current_m365_method = config.get("m365_auth_method", "oauth2")
+    print("\nMicrosoft 365 Connection & Authentication Methods:")
+    print(" [1] Direct OAuth2 (Recommended, direct connection using modern auth)")
+    print(" [2] DavMail Sidecar Proxy (Connect via local DavMail IMAP gateway)")
+    m365_choice = input(f"Choose connection method [default: {'1' if current_m365_method == 'oauth2' else '2'}]: ").strip()
     
-    if flow_choice == "2":
-        m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
-    else:
-        m365_refresh = run_m365_auth_code_flow(config["m365_client_id"], config["m365_tenant"])
+    m365_auth_method = current_m365_method
+    if m365_choice == "1":
+        m365_auth_method = "oauth2"
+    elif m365_choice == "2":
+        m365_auth_method = "password"
+
+    config["m365_auth_method"] = m365_auth_method
+
+    if m365_auth_method == "oauth2":
+        config["m365_client_id"] = config.get("m365_client_id") or CLIENT_ID_M365
+        if config["m365_client_id"] in ("YOUR_CLIENT_ID", "9a5bf30c-26d2-43fb-ab89-40c2136d88b4", "9e5f94bc-e8a4-4e73-b8be-63364c29d753", ""):
+            config["m365_client_id"] = CLIENT_ID_M365
+
+        default_tenant = get_m365_tenant(m365_email)
+        current_tenant = config.get("m365_tenant", default_tenant)
+        m365_tenant = input(f"Enter Microsoft 365 Tenant ID or domain [{current_tenant}]: ").strip() or current_tenant
+        config["m365_tenant"] = m365_tenant
+
+        print("\nMicrosoft 365 OAuth2 Flow Options:")
+        print(" [1] Authorization Code Flow (Recommended - works with device compliance policies)")
+        print(" [2] Device Code Flow (Alternative - may be blocked by some organizations)")
+        flow_choice = input("Choose M365 authentication flow [default: 1]: ").strip()
         
-    if not m365_refresh:
-        print("Error: Failed to obtain Microsoft 365 refresh token.")
-        sys.exit(1)
-    config["m365_refresh_token"] = m365_refresh
+        if flow_choice == "2":
+            m365_refresh = run_m365_device_flow(config["m365_client_id"], config["m365_tenant"])
+        else:
+            m365_refresh = run_m365_auth_code_flow(config["m365_client_id"], config["m365_tenant"])
+            
+        if not m365_refresh:
+            print("Error: Failed to obtain Microsoft 365 refresh token.")
+            sys.exit(1)
+        config["m365_refresh_token"] = m365_refresh
+        config.pop("m365_password", None)
+        config.pop("m365_imap_server", None)
+        config.pop("m365_imap_port", None)
+        config.pop("m365_imap_use_ssl", None)
+    else:
+        # DavMail Proxy Connection Settings
+        current_server = config.get("m365_imap_server", "localhost")
+        m365_imap_server = input(f"Enter M365/DavMail IMAP server [{current_server}]: ").strip() or current_server
+        
+        current_port = str(config.get("m365_imap_port", 1143))
+        m365_imap_port_input = input(f"Enter M365/DavMail IMAP port [{current_port}]: ").strip()
+        m365_imap_port = int(m365_imap_port_input) if m365_imap_port_input else int(current_port)
+        
+        current_ssl = config.get("m365_imap_use_ssl", False)
+        current_ssl_str = "y" if current_ssl else "n"
+        m365_imap_use_ssl_input = input(f"Use SSL/TLS for M365/DavMail connection? (y/n) [{current_ssl_str}]: ").strip().lower()
+        if m365_imap_use_ssl_input:
+            m365_imap_use_ssl = m365_imap_use_ssl_input == "y"
+        else:
+            m365_imap_use_ssl = current_ssl
+
+        current_pwd = config.get("m365_password", "")
+        if not current_pwd:
+            m365_password = input("Enter M365/DavMail Password: ").strip()
+        else:
+            m365_password = input("Enter M365/DavMail Password [Press Enter to keep existing]: ").strip() or current_pwd
+            
+        if not m365_password:
+            print("Error: Password is required for this connection method.")
+            sys.exit(1)
+            
+        config["m365_imap_server"] = m365_imap_server
+        config["m365_imap_port"] = m365_imap_port
+        config["m365_imap_use_ssl"] = m365_imap_use_ssl
+        config["m365_password"] = m365_password
+        
+        config.pop("m365_client_id", None)
+        config.pop("m365_tenant", None)
+        config.pop("m365_refresh_token", None)
 
     config["gmail_imap_server"] = config.get("gmail_imap_server") or "imap.gmail.com"
     config["gmail_imap_port"] = config.get("gmail_imap_port") or 993

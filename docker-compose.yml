@@ -6,6 +6,16 @@ services:
     image: email-bridge-test-suite
     command: pytest -v
 
+  davmail:
+    image: quay.io/connectical/davmail:latest
+    container_name: davmail
+    restart: unless-stopped
+    ports:
+      - "1143:1143"
+    volumes:
+      - ./davmail.properties:/etc/davmail/davmail.properties:rw
+      # Permissive mount so the davmail container user can write the persisted modern OAuth tokens back to the file
+
   bridge-daemon:
     build: .
     image: email-bridge-daemon
@@ -13,4 +23,7 @@ services:
     volumes:
       - ./config.json:/app/config.json
       - ./email_bridge.db:/app/email_bridge.db
+    depends_on:
+      - davmail
     restart: unless-stopped
+

@@ -345,5 +345,87 @@ class TestAuthSetupHelpers(unittest.TestCase):
         self.assertTrue(hasattr(auth_setup, 'run_m365_device_flow'))
 
 
+class TestM365PasswordConnection(unittest.TestCase):
+    """Tests for M365 password-based connections (such as DavMail sidecar proxy)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.test_dir.name, "test_password_bridge.db")
+
+    def tearDown(self):
+        self.test_dir.cleanup()
+
+    @patch('imaplib.IMAP4')
+    def test_connect_m365_password_imap_no_ssl(self, mock_imap):
+        mock_instance = MagicMock()
+        mock_imap.return_value = mock_instance
+        
+        imap = bridge_daemon.connect_m365_password_imap(
+            "m365@example.com", "secret123", "localhost", 1143, use_ssl=False
+        )
+        
+        self.assertEqual(imap, mock_instance)
+        mock_imap.assert_called_once_with("localhost", 1143)
+        mock_instance.login.assert_called_once_with("m365@example.com", "secret123")
+
+    @patch('imaplib.IMAP4_SSL')
+    def test_connect_m365_password_imap_with_ssl(self, mock_imap_ssl):
+        mock_instance = MagicMock()
+        mock_imap_ssl.return_value = mock_instance
+        
+        imap = bridge_daemon.connect_m365_password_imap(
+            "m365@example.com", "secret123", "localhost", 993, use_ssl=True
+        )
+        
+        self.assertEqual(imap, mock_instance)
+        mock_imap_ssl.assert_called_once_with("localhost", 993)
+        mock_instance.login.assert_called_once_with("m365@example.com", "secret123")
+
+    @patch('bridge_daemon.connect_gmail_imap')
+    @patch('bridge_daemon.connect_m365_password_imap')
+    @patch('bridge_daemon.refresh_m365_token')
+    def test_sync_emails_password_auth_does_not_refresh_token(self, mock_refresh, mock_connect_m365, mock_connect_gmail):
+        # Setup config for password-based M365 auth
+        config = {
+            "m365_auth_method": "password",
+            "m365_email": "m365@example.com",
+            "m365_password": "m365_password_123",
+            "m365_imap_server": "davmail-host",
+            "m365_imap_port": 1143,
+            "m365_imap_use_ssl": False,
+            "gmail_email": "gmail@example.com",
+            "gmail_password": "gmail_password_123",
+            "gmail_auth_method": "app_password",
+            "database_path": self.db_path
+        }
+        
+        mock_m365 = MagicMock()
+        mock_connect_m365.return_value = mock_m365
+        mock_m365.status.return_value = ('OK', [b'"INBOX" (UIDVALIDITY 100)'])
+        mock_m365.uid.side_effect = [
+            ('OK', [b'42']),
+            ('OK', [(b'42 (INTERNALDATE "08-Jul-2026 12:00:00 +0000" FLAGS (\\Seen) BODY[HEADER] {50}', b'Message-ID: <test-id-123>\r\n\r\n')]),
+            ('OK', [(b'42 (RFC822 {100}', b'From: sender@example.com\r\n\r\nHello World')])
+        ]
+        
+        mock_gmail = MagicMock()
+        mock_connect_gmail.return_value = mock_gmail
+        mock_gmail.append.return_value = ('OK', [b'Append UID 1'])
+        
+        bridge_daemon.sync_emails(config, "fake_config_path")
+        
+        # Verify refresh_m365_token was NEVER called
+        mock_refresh.assert_not_called()
+        
+        # Verify connect_m365_password_imap was called with correct args
+        mock_connect_m365.assert_called_once_with(
+            "m365@example.com",
+            "m365_password_123",
+            "davmail-host",
+            1143,
+            False
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

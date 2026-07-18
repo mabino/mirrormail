@@ -178,6 +178,20 @@ def connect_m365_imap(email_addr, access_token):
     except Exception as e:
         raise Exception(f"Microsoft 365 IMAP authentication failed: {e}")
 
+def connect_m365_password_imap(email_addr, password, host, port, use_ssl=False):
+    """
+    Establishes IMAP connection to Microsoft 365 (via DavMail or local gateway) using standard password login.
+    """
+    try:
+        if use_ssl:
+            imap = imaplib.IMAP4_SSL(host, port)
+        else:
+            imap = imaplib.IMAP4(host, port)
+        imap.login(email_addr, password)
+        return imap
+    except Exception as e:
+        raise Exception(f"Microsoft 365 IMAP login failed on {host}:{port}: {e}")
+
 def connect_gmail_imap(email_addr, password, host="imap.gmail.com", port=993):
     """
     Establishes IMAP connection to Gmail and logs in.
@@ -254,10 +268,13 @@ def sync_emails(config, config_path):
     db_path = config.get("database_path", "email_bridge.db")
     init_db(db_path)
     
+    m365_auth_method = config.get("m365_auth_method", "oauth2")
     gmail_method = config.get("gmail_auth_method", "app_password")
     
-    print("Refreshing Microsoft 365 token...")
-    m365_access_token = refresh_m365_token(config, config_path)
+    m365_access_token = None
+    if m365_auth_method == "oauth2":
+        print("Refreshing Microsoft 365 token...")
+        m365_access_token = refresh_m365_token(config, config_path)
     
     google_access_token = None
     if gmail_method in ("oauth2_imap", "oauth2_api"):
@@ -265,7 +282,16 @@ def sync_emails(config, config_path):
         google_access_token = refresh_google_token(config)
     
     print(f"Connecting to Microsoft 365 IMAP for {config['m365_email']}...")
-    m365_imap = connect_m365_imap(config["m365_email"], m365_access_token)
+    if m365_auth_method == "password":
+        m365_imap = connect_m365_password_imap(
+            config["m365_email"],
+            config["m365_password"],
+            config.get("m365_imap_server", "localhost"),
+            config.get("m365_imap_port", 1143),
+            config.get("m365_imap_use_ssl", False)
+        )
+    else:
+        m365_imap = connect_m365_imap(config["m365_email"], m365_access_token)
     
     gmail_imap = None
     try:
@@ -442,10 +468,16 @@ def main():
         print(f"Error reading config file: {e}")
         sys.exit(1)
         
+    m365_auth_method = config.get("m365_auth_method", "oauth2")
     gmail_method = config.get("gmail_auth_method", "app_password")
     
     # Verify required keys dynamically based on auth method
-    required_keys = ["m365_client_id", "m365_email", "m365_refresh_token", "gmail_email"]
+    required_keys = ["m365_email", "gmail_email"]
+    if m365_auth_method == "oauth2":
+        required_keys.extend(["m365_client_id", "m365_refresh_token"])
+    else:
+        required_keys.append("m365_password")
+        
     if gmail_method == "app_password":
         required_keys.append("gmail_password")
     else:
