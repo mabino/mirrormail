@@ -155,6 +155,10 @@ class TestBridgeDaemon(unittest.TestCase):
     def test_sync_emails_app_password_copies_new_message(self, mock_refresh, mock_connect_m365, mock_connect_gmail):
         mock_refresh.return_value = "access_token"
         
+        # Pre-populate sync state to trigger incremental sync instead of bootstrap
+        bridge_daemon.init_db(self.db_path)
+        bridge_daemon.update_sync_state(self.db_path, "m365@example.com", 100, 41)
+        
         mock_m365 = MagicMock()
         mock_connect_m365.return_value = mock_m365
         mock_m365.status.return_value = ('OK', [b'"INBOX" (UIDVALIDITY 100)'])
@@ -186,6 +190,10 @@ class TestBridgeDaemon(unittest.TestCase):
         mock_refresh_m365.return_value = "m365_token"
         mock_refresh_google.return_value = "google_token"
         
+        # Pre-populate sync state to trigger incremental sync instead of bootstrap
+        bridge_daemon.init_db(self.db_path)
+        bridge_daemon.update_sync_state(self.db_path, "m365@example.com", 200, 98)
+        
         mock_m365 = MagicMock()
         mock_connect_m365.return_value = mock_m365
         mock_m365.status.return_value = ('OK', [b'"INBOX" (UIDVALIDITY 200)'])
@@ -211,6 +219,28 @@ class TestBridgeDaemon(unittest.TestCase):
             []
         )
         self.assertTrue(bridge_daemon.is_email_processed(self.db_path, "m365@example.com", 200, 99, "<oauth-id-456>"))
+
+    @patch('bridge_daemon.connect_gmail_imap')
+    @patch('bridge_daemon.connect_m365_imap')
+    @patch('bridge_daemon.refresh_m365_token')
+    def test_sync_emails_performs_bootstrap_on_first_run(self, mock_refresh, mock_connect_m365, mock_connect_gmail):
+        mock_refresh.return_value = "access_token"
+        
+        mock_m365 = MagicMock()
+        mock_connect_m365.return_value = mock_m365
+        mock_m365.status.return_value = ('OK', [b'"INBOX" (UIDVALIDITY 100)'])
+        mock_m365.uid.return_value = ('OK', [b'40 41 42'])
+        
+        # Run sync_emails on uninitialized DB
+        bridge_daemon.sync_emails(self.config, self.config_path)
+        
+        # Check that the max UID (42) and UIDVALIDITY (100) were saved to sync_state
+        validity, last_uid = bridge_daemon.get_sync_state(self.db_path, "m365@example.com")
+        self.assertEqual(validity, 100)
+        self.assertEqual(last_uid, 42)
+        
+        # No emails should have been copied (Gmail IMAP client append was not called)
+        mock_connect_gmail.return_value.append.assert_not_called()
 
 
 class TestM365AuthCodeFlow(unittest.TestCase):
@@ -470,6 +500,10 @@ class TestM365PasswordConnection(unittest.TestCase):
             "gmail_auth_method": "app_password",
             "database_path": self.db_path
         }
+        
+        # Pre-populate sync state to trigger incremental sync instead of bootstrap
+        bridge_daemon.init_db(self.db_path)
+        bridge_daemon.update_sync_state(self.db_path, "m365@example.com", 100, 41)
         
         mock_m365 = MagicMock()
         mock_connect_m365.return_value = mock_m365

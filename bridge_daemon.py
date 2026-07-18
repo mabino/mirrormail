@@ -37,6 +37,48 @@ def init_db(db_path):
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_uid ON processed_emails(m365_email, uid_validity, uid)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_msg_id ON processed_emails(message_id)')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sync_state (
+                m365_email TEXT PRIMARY KEY,
+                uid_validity INTEGER NOT NULL,
+                last_processed_uid INTEGER NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_sync_state(db_path, m365_email):
+    """
+    Retrieves the sync state (uid_validity, last_processed_uid) for a given email address.
+    Returns (uid_validity, last_processed_uid) or (None, None).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT uid_validity, last_processed_uid FROM sync_state WHERE m365_email = ?
+        ''', (m365_email,))
+        row = cursor.fetchone()
+        if row:
+            return row[0], row[1]
+    finally:
+        conn.close()
+    return None, None
+
+def update_sync_state(db_path, m365_email, uid_validity, last_processed_uid):
+    """
+    Updates or inserts the sync state for a given email address.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO sync_state (m365_email, uid_validity, last_processed_uid, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (m365_email, uid_validity, last_processed_uid))
         conn.commit()
     finally:
         conn.close()
@@ -327,16 +369,41 @@ def sync_emails(config, config_path):
             # Select INBOX
             m365_imap.select("INBOX")
             
-            # Retrieve all UIDs
-            res, search_data = m365_imap.uid('search', None, 'ALL')
-            if res != 'OK':
-                raise Exception(f"Failed to search INBOX: {search_data}")
+            # Load stored sync state
+            stored_validity, last_processed_uid = get_sync_state(db_path, config["m365_email"])
+            
+            # Retrieve new UIDs based on state
+            if stored_validity == uid_validity and last_processed_uid is not None:
+                # Normal incremental sync
+                print(f"Incremental sync: checking for new messages with UID > {last_processed_uid}...")
+                res, search_data = m365_imap.uid('search', None, f'UID {last_processed_uid + 1}:*')
+                if res != 'OK':
+                    raise Exception(f"Failed to search INBOX: {search_data}")
                 
-            m365_uids = []
-            if search_data and search_data[0]:
-                m365_uids = [int(uid) for uid in search_data[0].split()]
+                m365_uids = []
+                if search_data and search_data[0]:
+                    m365_uids = [int(uid) for uid in search_data[0].split()]
                 
-            print(f"Found {len(m365_uids)} messages in Microsoft 365 INBOX.")
+                # Filter out UIDs <= last_processed_uid in case the range search included the boundary
+                m365_uids = [uid for uid in m365_uids if uid > last_processed_uid]
+            else:
+                # First run or UIDVALIDITY mismatch -> Perform Bootstrap
+                print("First run or UIDVALIDITY mismatch. Performing initial bootstrap...")
+                res, search_data = m365_imap.uid('search', None, 'ALL')
+                if res != 'OK':
+                    raise Exception(f"Failed to search INBOX: {search_data}")
+                
+                m365_uids = []
+                if search_data and search_data[0]:
+                    m365_uids = [int(uid) for uid in search_data[0].split()]
+                
+                max_uid = max(m365_uids) if m365_uids else 0
+                print(f"Bootstrapping: marking all {len(m365_uids)} existing emails (up to UID {max_uid}) as processed/ignored.")
+                update_sync_state(db_path, config["m365_email"], uid_validity, max_uid)
+                print("Initial bootstrap complete. Bridge will mirror future incoming emails.")
+                return
+                
+            print(f"Found {len(m365_uids)} new messages in Microsoft 365 INBOX.")
             
             copied_count = 0
             skipped_count = 0
@@ -435,6 +502,9 @@ def sync_emails(config, config_path):
                         print(f"Failed to append UID {uid} to Gmail: {append_data}")
                     
             print(f"Sync complete. Copied: {copied_count}, Skipped: {skipped_count}")
+            if m365_uids:
+                max_processed_uid = max(m365_uids)
+                update_sync_state(db_path, config["m365_email"], uid_validity, max_processed_uid)
             
         finally:
             if gmail_imap:
